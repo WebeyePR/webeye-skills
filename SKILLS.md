@@ -7,7 +7,9 @@
 | 技能名称 | 描述 | 路径 | 状态 |
 | :--- | :--- | :--- | :--- |
 | [example-skill](./skills/example-skill) | 文本摘要示例技能 | `skills/example-skill` | ✅ 生产可用 |
-| [feishu-knowledge-base](./skills/feishu-knowledge-base) | 飞书知识库同步/搜索 | `skills/feishu-knowledge-base` | 🚧 建设中 |
+| [feishu-crm-automation](./skills/feishu-crm-automation) | 自动工单创建助手 | `skills/feishu-crm-automation` | ✅ 生产可用 |
+| [crm-copilot](./skills/crm-copilot) | 销售跟进记录提效助手 | `skills/crm-copilot` | ✅ 生产可用 |
+| [feishu-knowledge-base](./skills/feishu-knowledge-base) | 飞书知识库专家助理 | `skills/feishu-knowledge-base` | 🚧 建设中 |
 
 ---
 *注：本文件由维护者手动更新，用于快速检索。更多技能动态请关注 [README.md](./README.md)*
