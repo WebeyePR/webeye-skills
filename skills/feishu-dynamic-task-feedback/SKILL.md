@@ -1,12 +1,13 @@
-# [SKILL] 飞书消息进度条 (极简版)
+---
+name: feishu-dynamic-task-feedback
+description: 通过在原始指令消息上动态切换表情，实时反馈后台任务进度，确保非侵入式的极致交互体验。
+alwaysActive: true
+version: 1.0.2
+author: guyue
+license: MIT
+---
 
-| Field      | Value                                           |
-| ---------- | ----------------------------------------------- |
-| Identifier | `feishu-dynamic-task-feedback`                  |
-| Version    | 1.0.2                                           |
-| Always Active | `true`                                         |
-| Author     | guyue                                           |
-| License    | MIT                                             |
+# [SKILL] 飞书消息进度条 (极简版)
 
 ## 🎯 设计初心 (Design Philosophy)
 
