@@ -10,6 +10,11 @@
 | [feishu-crm-copilot](./skills/feishu-crm-copilot) | 销售跟进提效 | ✅ 生产可用 | 将原始沟通素材转化为高质量 CRM 记录 |
 | [feishu-knowledge-base](./skills/feishu-knowledge-base) | 知识库专家 | ✅ 生产可用 | 基于飞书知识库进行检索与信息总结 |
 | [feishu-dynamic-task-feedback](./skills/feishu-dynamic-task-feedback) | 动态任务反馈 | ✅ 生产可用 | 为复杂任务提供非侵入式的视觉进度反馈 |
+| [gcp-support-ticket](./skills/gcp-support-ticket) | 工单起草助手 | ✅ 生产可用 | 协助起草符合 GCP 最佳实践的技术工单 |
+| [agent-proxy-communication](./skills/agent-proxy-communication) | 代理身份通信 | 🚧 开发中 | 解决跨 Agent 身份识别与 XML @ 强提醒问题 |
+| [feishu-contract-audit](./skills/feishu-contract-audit) | 合同自动审核 | ✅ 生产可用 | 自动提取 GCP 合同条款并同步录入飞书 |
+| [content-broadcast](./skills/content-broadcast) | 内容定向分发 | ✅ 生产可用 | 多渠道内容解析与自动化分发工作流 |
+| [billing-config-error](./skills/billing-config-error) | 账单系统纠错 | ✅ 生产可用 | 处理重复配置报错并追踪系统组件状态 |
 | [feishu-crm-automation](./skills/feishu-crm-automation) | 工单自动创建 | 🚧 开发中 | 解析指令并静默创建飞书 aPaaS 工单 |
 
 ---
