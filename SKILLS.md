@@ -6,10 +6,10 @@
 
 | 技能名称 | 描述 | 状态 | 核心作用 |
 | :--- | :--- | :--- | :--- |
-| [crm-copilot](./skills/crm-copilot) | 销售跟进提效 | ✅ 生产可用 | 将原始沟通素材转化为高质量 CRM 记录 |
 | [example-skill](./skills/example-skill) | 示例摘要技能 | ✅ 生产可用 | 演示技能结构与基础文本摘要功能 |
+| [crm-copilot](./skills/crm-copilot) | 销售跟进提效 | ✅ 生产可用 | 将原始沟通素材转化为高质量 CRM 记录 |
 | [feishu-crm-automation](./skills/feishu-crm-automation) | 工单自动创建 | ✅ 生产可用 | 解析指令并静默创建飞书 aPaaS 工单 |
-| [feishu-knowledge-base](./skills/feishu-knowledge-base) | 知识库专家 | 🚧 建设中 | 基于飞书知识库进行检索与信息总结 |
+| [feishu-knowledge-base](./skills/feishu-knowledge-base) | 知识库专家 | ✅ 生产可用 | 基于飞书知识库进行检索与信息总结 |
 
 ---
 *注：本文件由维护者手动更新，用于快速检索。更多技能动态请关注 [README.md](./README.md)*
