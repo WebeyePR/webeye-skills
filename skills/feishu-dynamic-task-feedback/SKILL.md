@@ -2,8 +2,9 @@
 
 | Field      | Value                                           |
 | ---------- | ----------------------------------------------- |
-| Identifier | `feishu-dynamic-task-feedback`                         |
+| Identifier | `feishu-dynamic-task-feedback`                  |
 | Version    | 1.0.2                                           |
+| Always Active | `true`                                         |
 | Author     | guyue                                           |
 | License    | MIT                                             |
 
