@@ -1,4 +1,4 @@
-# Webeye CSBU AI Skills (webeye-skills)
+# Webeye CSBU AI Skills
 
 这是一个通用的技能库，专为 Webeye CSBU 部门设计，用于存放和管理各类 AI 技能、自动化脚本及工具。
 
