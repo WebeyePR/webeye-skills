@@ -1,5 +1,5 @@
 ---
-name: crm-copilot
+name: feishu-crm-copilot
 description: 销售跟进记录提效助手。将销售的原始沟通素材转化为符合资深谷歌云销售 Leader 质检标准的高质量结构化 CRM 记录。严格基于四步确认流水线和固定数据表执行，绝不擅自越权。
 ---
 
