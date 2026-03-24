@@ -9,9 +9,9 @@
 | 技能名称 | 状态 | 工程化复杂度 | 可复用性 | 核心作用 |
 | :--- | :--- | :--- | :--- | :--- |
 | [example-skill](https://github.com/WebeyePR/webeye-skills/tree/main/skills/example-skill) | ✅ 生产可用 | 低 | 高 | 技能示例，演示技能标准结构与基础文本摘要功能。 |
-| [feishu-crm-copilot](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-crm-copilot) | ✅ 生产可用 | 中 | 中 | 将销售沟通原始录音/文字转化为 CRM 结构化数据。 |
+| [feishu-crm-copilot](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-crm-copilot) | ✅ 生产可用 | 中 | 中 | 将销售沟通原始素材（文字/截图/会议记录等）转化为 CRM 结构化数据自动提交。 |
 | [feishu-knowledge-base](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-knowledge-base) | ✅ 生产可用 | 中 | 高 | 基于飞书知识库的检索增强生成 (RAG) 问答。 |
-| [feishu-dynamic-task-feedback](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-dynamic-task-feedback) | ✅ 生产可用 | 低 | 高 | **必备协议**：通过动态表情提供实时视觉进度反馈。 |
+| [feishu-dynamic-task-feedback](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-dynamic-task-feedback) | 🚧 调试中 | 低 | 高 | 通过动态表情提供实时视觉进度反馈。 |
 | [gcp-support-ticket](https://github.com/WebeyePR/webeye-skills/tree/main/skills/gcp-support-ticket) | ✅ 生产可用 | 低 | 中 | 协助起草并优化符合 GCP 最佳实践的技术支持工单。 |
 | [feishu-contract-audit](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-contract-audit) | ✅ 生产可用 | 中 | 低 | 自动解析 GCP 合同条款并录入飞书 Checklist。 |
 | [content-broadcast](https://github.com/WebeyePR/webeye-skills/tree/main/skills/content-broadcast) | ✅ 生产可用 | 中 | 中 | 内容多渠道解析与自动化定向广播分发。 |
