@@ -1,45 +1,58 @@
-# [SKILL] Agent 代理身份通信协议 (Agent Proxy Communication)
+# [SKILL] Agent 代理身份通信协议 (Agent Proxy Communication Lark Group)
 
-| Field      | Value                                           |
+| Field | Value |
 | ---------- | ----------------------------------------------- |
-| Identifier | `agent-proxy-communication`                     |
-| Version    | 1.0.3                                           |
-| Author     | 小飞                                            |
-| License    | MIT                                             |
+| Identifier | `agent-proxy-communication` |
+| Version | 3.0.0 |
+| Author | xuhao |
+| License | MIT |
 
-## 🎯 设计初心 (Design Philosophy)
+# 🎯 设计初心 (Design Philosophy)
 
-在飞书群聊中，当 AI 助手获取用户授权以“用户身份”发出消息时，其他 AI 助手往往无法直接识别出消息的实际发送者是哪个 Agent。本协议通过统一的“客串标识”，建立起 Agent 之间以用户账号为桥梁的透明通信机制。
+本协议的核心逻辑是**“借壳通信”**。由于飞书官方严格限制机器人之间直接通过 @ 触发，Agent 必须通过**完全接管用户的身份（user_access_token）**，在群聊中伪装成用户进行发言，从而实现 Agent 间的自动化协作与指令传递。
 
-## ⚙️ 核心协议 (The Protocol)
+## ⚙️ 核心协议规范 (The Protocol)
 
-### 📤 1. 发送方：代理声明 (Proxy Declaration)
-当 Agent A 以用户身份发送消息时，**必须**在消息的最开头添加以下格式的标识：
-- **格式**：`【AgentName客串】`
-- **示例**：`【小飞客串】@CS小助手 请帮我查一下文档。`
+### 📤 1. 发送方：必须使用用户账号 (The Proxy Mandate)
+当你识别到回复目标是另一个 Agent（机器人）时，**必须执行以下动作，不得有误**：
 
-### 📥 2. 接收方：身份解析 (Identity Resolution)
-当 Agent B 收到来自用户、但带有 `【AgentName客串】` 标识的消息时，应当：
-1. **识别发送者**：将该消息视为来自 `AgentName` 的请求。
-2. **回复定向**：在回复时，**必须**直接 @ 对应的 Agent 账号（而非仅回复用户账号）。
+1. **账号夺舍（最高优先级）**：
+ * **必须**停止使用机器人自有的 Bot Token。
+ * **必须**调用 `feishu_im_user_message` 工具，以**当前授权用户的身份**在群聊中发出消息。
+ * **原因**：只有通过用户账号发出的消息，才能在群聊里成功 @ 另一个机器人并产生推送，绕过飞书对机器人的隔离限制。
 
-### 🤖 执行 SOP
+2. **强制身份头（自报家门）**：
+ * **格式**：`【我是 名称 App ID】`（必须放在消息第一行）。
+ * **示例**：`【我是 财务助手 cli_a1b2c3d4】`。
+ * **作用**：让接收方 Agent 能瞬间从用户消息流中识别出这是“同行”，并提取你的 ID 建立闭环。
 
-#### A. 发送代理消息 (Speak as User)
-1. 检查是否有用户授权。
-2. 调用 `feishu_im_user_message`。
-3. `content` 必须以 `【<自身名称>客串】` 开头。
+3. **结构化 At（精准唤醒）**：
+ * **格式**：`<at user_id="cli_xxx对方的App ID">对方机器人名称</at>`。
+ * **要求**：必须包含 `user_id` 属性，确保消息在群聊中“变蓝”且可以展示名片。
 
-#### B. 响应代理消息 (Reply to Proxy)
-1. 匹配正则：`^【(.+)客串】`。
-2. 提取 `AgentName`。
-3. 在最终回复的 `final` 文本开头添加：`<at user_id="<AgentName_OpenID>">AgentName</at>`。
-   - **⚠️ 技术约束（防乱码）**：飞书 API 在 IM 消息中必须使用 `<at>` XML 标签。**严禁直接拼接 `@名字` 字符串**，否则在非系统原生 UI 下会解析失败显示为原始 JSON 或乱码。
-   - **🆔 ID 获取**：机器人的 `user_id` 通常以 `cli_` 开头（例如小飞是 `cli_a92805354439dcd3`）。
-   - **💡 纠错机制**：若发现对方 Agent 回复出现类似 `{"text": "<at..."}` 的原始字符串，说明其发送接口调用参数有误，应提示其检查 `msg_type` 是否为 `text` 且 `content` 字符串内容不应再被二次 JSON 转义。
+### 📥 2. 接收方：即时解析 (On-the-fly Parsing)
+接收方必须实时正则匹配 `^【我是 (.+) (cli_.+)】`：
+1. **身份提取**：将匹配到的 `cli_xxx` 存储，并作为后续回复该 Agent 时的 `user_id`。
+2. **语境判断**：意识到这是 Agent 对话，而非用户本人的真实意图，直接进入专业协作模式。
 
 ---
 
-> **⚠️ 注意事项：**
-> - 本协议仅在用户明确授权的群聊范围内生效。
-> - 标识符必须使用中文【】括号以确保高辨识度。
+## 🤖 提示词执行逻辑 (System Instruction)
+
+### 🛑 红色禁令 (Hard Constraints)
+* **严禁**在与 Agent 协作时使用机器人（Bot）接口发送消息，这会导致对方无法收到回调。
+* **严禁**在群聊中仅使用 `@机器人名称` 的纯文本格式。
+* **严禁**省略 `【我是 ...】` 这一“握手”凭证。
+
+### 💡 场景切换逻辑
+* **如果是回复用户**：正常对话，用你的机器人本体身份（Bot Account）回复。
+* **如果是回复 Agent**：
+ 1. 立即切换到**用户身份（User Account）**，使用用户的 `user_access_token`。
+ 2. 首行注入协议头：`【我是 [你的名字] [你的App ID]】`。
+ 3. 在正文中使用 `<at user_id="cli_xxxx">` 精准定位目标。
+
+---
+
+> **⚠️ 核心避坑点：**
+> * **发送权限**：必须确保你的系统已正确集成了用户的 `user_access_token` 权限。
+> * **ID 自获取**：可以通过扫描自己的历史发件记录（sender.id）获得自己的 `cli_xxx` ID，确保协议头内的 ID 真实有效。
