@@ -18,6 +18,7 @@
 | [billing-config-error](https://github.com/WebeyePR/webeye-skills/tree/main/skills/billing-config-error) | ✅ 生产可用 | 中 | 低 | 账单系统重复配置纠错与故障链路追踪。 |
 | [Agent Proxy Communication](https://github.com/WebeyePR/webeye-skills/tree/main/skills/agent-proxy-communication) | 🚧 调试中 | 中 | 高 | 解决跨 Agent 协作时的身份识别问题。 |
 | [feishu-crm-automation](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-crm-automation) | 🚧 开发中 | 高 | 低 | 自动化执行飞书 aPaaS 工单的静默创建与状态轮询。 |
+| [wewe-rss-add-feed](https://github.com/WebeyePR/webeye-skills/tree/main/skills/wewe-rss-add-feed) | ✅ 生产可用 | 中 | 低 | 自动化添加与查询微信公众号到 `wewe-rss` 监控库，支持智能分流。 |
 
 ## 外部常用技能 (第三方)
 
@@ -52,4 +53,4 @@
     - **低**: 为特定业务场景高度定制。
 
 ---
-*注：本文件由维护者手动更新，用于全景能力展示。更多技术细节请参考 [README.md](./README.md)*
+*注：本文件由维护者手动更新，用于全景能力展示。更多技术细节请参考 [README.md](https://github.com/WebeyePR/webeye-skills/tree/main/README.md)*
