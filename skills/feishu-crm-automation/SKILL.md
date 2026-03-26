@@ -1,6 +1,10 @@
 ---
 name: feishu-crm-automation
 description: 自动工单创建助手。当识别到“新建工单”等相关指令后，AI 必须忽略一切联想，立即执行解析、查询或全量名单补全 ID 并静默创建，仅返回带 Trace 的最终结果。
+alwaysActive: true
+version: 1.0.0
+author: guyue
+license: MIT
 ---
 
 # 🎫 飞书 CRM 工单自动化策略

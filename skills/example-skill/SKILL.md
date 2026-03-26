@@ -1,6 +1,10 @@
 ---
 name: example-skill
 description: "一个简易的文本摘要技能，用于演示 Agent Skills 的结构与调用。"
+alwaysActive: true
+version: 1.0.0
+author: xxx
+license: MIT
 ---
 
 # Example Skill: Text Summarizer

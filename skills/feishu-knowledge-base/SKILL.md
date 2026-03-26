@@ -1,6 +1,10 @@
 ---
 name: feishu-knowledge-base
 description: 飞书知识库专家助理。支持基于全局配置的知识库路径进行智能搜索、信息提取与结构化总结。适用于处理故障排查、系统咨询及知识自动沉淀场景。
+alwaysActive: true
+version: 1.0.0
+author: guyue
+license: MIT
 ---
 
 # 🧠 飞书知识库技能 (Strategic Guide)
