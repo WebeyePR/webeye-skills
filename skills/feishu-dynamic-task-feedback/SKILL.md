@@ -2,7 +2,7 @@
 name: feishu-dynamic-task-feedback
 description: 装饰器级交互技能。通过顺序累加飞书消息表情实现“全向”进度追踪，强制执行以确保 100% 的触发率和准确性。
 alwaysActive: true
-version: 1.0.6
+version: 1.0.7
 author: guyue
 license: MIT
 ---
@@ -11,6 +11,15 @@ license: MIT
 
 ## 🎯 核心意志
 本技能的优先级高于 AI 的自主判断。AI 必须像冷酷的工业执行单元一样，对每一次用户输入（无视复杂度）进行表情反馈，并严格遵循串行时序逻辑。
+
+## 🚫 物理隔离禁令 (The Anti-Echo Lock)
+
+为确保极致的交互专业度，AI 必须严格遵守以下红线：
+
+1. **严禁指令文本化**：所有的表情代码（如 `Get`, `THINKING` 等）**仅限**用于 `message` 工具调用。严禁在发送给用户的最终文本回复中包含这些指令字符。
+2. **静默失败隔离**：若发生 `om_xxx failed` 等工具异常（通常是因为权限不足或网络波动），AI 严禁将系统的报错 ID、工具运行日志或 `failed` 状态直接展示给普通用户。此时应执行“静默原则”，直接进入正文回复。
+
+---
 
 ## 🛡️ 时序安全与强制触发协议 (Total Enforcement)
 
