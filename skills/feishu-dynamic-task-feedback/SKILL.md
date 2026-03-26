@@ -2,7 +2,7 @@
 name: feishu-dynamic-task-feedback
 description: 装饰器级交互技能。通过顺序累加飞书消息表情实现“全向”进度追踪，强制执行以确保 100% 的触发率和准确性。
 alwaysActive: true
-version: 1.0.5
+version: 1.0.6
 author: guyue
 license: MIT
 ---
@@ -43,17 +43,17 @@ AI 在执行交互时，必须严格遵守以下物理级约束：
 - `CheckMark`, `WARNING`, `ERROR` (极其不稳)
 - `PENCIL`, `GET`, `Thinking` (非标准拼写或全部大写导致的失效)
 
-## 🛡️ AI 错误处理 SOP (Error Handling)
+## 🛡️ AI 错误处理与重试 SOP (Error Handling & Retry)
 
-**AI 必须实时关注 `message` 工具的工具输出：**
+**AI 必须实时关注 `message` 工具的返回结果，并在失败时开启“重试+降级”多级恢复：**
 
-1.  **先行试探**：默认首选 `Elite Tier` 进行 `react` 操作。
-2.  **错误感知**：若收到类似 `om_xxx ... failed` 或 `Internal Error (400)` 的回复。
-3.  **秒级止损**：**严禁重试首选值**。必须在这一步紧接着尝试对应的 `Robust Tier` 指令。
-4.  **无缝衔接**：即便表情点亮失败，也不允许报怨，直接进入核心业务生成环节。
+1.  **先行试探**：默认执行一次 `Elite Tier` 表情点亮。
+2.  **波动重试 (Retry Once)**：若收到 `failed` 或 `Internal Error` 类报错，**立即原样重试一次** 该指令，以应对瞬间网络抖动。
+3.  **降级补位 (Fallback)**：若重试依然失败，或明确收到 `400 Bad Request`，**立即发起对应阶段的 Robust Tier 表情点亮**。
+4.  **友好告知 (Friendly Note)**：若全链路尝试（Elite-Retry-Fallback）均由于网络不可抗力失败，AI 必须在当次回合生成的文本回复末尾，以引用块或斜体字增加一行温馨脚注（例：`*💡 Boss，检测到网络波动，进度追踪显示受限，但不影响当前任务处理。*`）。
 
 ---
 
 > **⚠️ API 严格规范：**
-> - **拼写即生命**：`Get` 必须首字母大写；其余 `THINKING`、`STRIVE`、`DONE`、`SOB` 必须全大写。
+> - **拼写即生命**：禁止修改表情指令大小写，如 `Get` 必须首字母大写；`STRIVE`、`DONE`、`MUSCLE` 必须全大写。
 > - **只加不减**：无需移除操作，表情顺序排布即为进度条。
