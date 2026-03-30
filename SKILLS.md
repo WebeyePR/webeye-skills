@@ -8,17 +8,17 @@
 
 | 技能名称 | 状态 | 工程化复杂度 | 可复用性 | 核心作用 |
 | :--- | :--- | :--- | :--- | :--- |
-| [example-skill](https://github.com/WebeyePR/webeye-skills/tree/main/skills/example-skill) | ✅ 生产可用 | 低 | 高 | 技能示例，演示技能标准结构与基础文本摘要功能。 |
-| [feishu-crm-copilot](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-crm-copilot) | ✅ 生产可用 | 中 | 中 | 将销售沟通原始素材（文字/截图/会议记录等）转化为 CRM 结构化数据自动提交。 |
-| [feishu-knowledge-base](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-knowledge-base) | ✅ 生产可用 | 中 | 高 | 基于飞书知识库的检索增强生成 (RAG) 问答。 |
-| [feishu-dynamic-task-feedback](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-dynamic-task-feedback) | 🚧 调试中 | 低 | 高 | 通过动态表情提供实时视觉进度反馈。 |
-| [gcp-support-ticket](https://github.com/WebeyePR/webeye-skills/tree/main/skills/gcp-support-ticket) | ✅ 生产可用 | 低 | 中 | 协助起草并优化符合 GCP 最佳实践的技术支持工单。 |
-| [feishu-contract-audit](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-contract-audit) | ✅ 生产可用 | 中 | 低 | 自动解析 GCP 合同条款并录入飞书 Checklist。 |
-| [content-broadcast](https://github.com/WebeyePR/webeye-skills/tree/main/skills/content-broadcast) | ✅ 生产可用 | 中 | 中 | 内容多渠道解析与自动化定向广播分发。 |
-| [billing-config-error](https://github.com/WebeyePR/webeye-skills/tree/main/skills/billing-config-error) | ✅ 生产可用 | 中 | 低 | 账单系统重复配置纠错与故障链路追踪。 |
-| [Agent Proxy Communication](https://github.com/WebeyePR/webeye-skills/tree/main/skills/agent-proxy-communication) | 🚧 调试中 | 中 | 高 | 解决跨 Agent 协作时的身份识别问题。 |
-| [feishu-crm-automation](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-crm-automation) | 🚧 开发中 | 高 | 低 | 自动化执行飞书 aPaaS 工单的静默创建与状态轮询。 |
-| [wewe-rss-add-feed](https://github.com/WebeyePR/webeye-skills/tree/main/skills/wewe-rss-add-feed) | ✅ 生产可用 | 中 | 低 | 自动化添加与查询微信公众号到 `wewe-rss` 监控库，支持智能分流。 |
+| [**example-skill** (示例技能)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/example-skill) | ✅ 生产可用 | 低 | 高 | 技能示例，演示技能标准结构与基础文本摘要功能。 |
+| [**feishu-crm-copilot** (飞书 CRM 提效助手)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-crm-copilot) | ✅ 生产可用 | 中 | 中 | 将销售沟通原始素材（文字/截图/会议记录等）转化为 CRM 结构化数据自动提交。 |
+| [**feishu-knowledge-base** (指定飞书知识库)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-knowledge-base) | ✅ 生产可用 | 中 | 高 | 基于飞书知识库的检索增强生成 (RAG) 问答。 |
+| [**feishu-dynamic-task-feedback** (飞书消息进度条)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-dynamic-task-feedback) | 🚧 调试中 | 低 | 高 | 通过动态表情提供实时视觉进度反馈。 |
+| [**gcp-support-ticket** (GCP 工单助手)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/gcp-support-ticket) | ✅ 生产可用 | 低 | 中 | 协助起草并优化符合 GCP 最佳实践的技术支持工单。 |
+| [**feishu-contract-audit** (飞书合同审核)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-contract-audit) | ✅ 生产可用 | 中 | 低 | 自动解析 GCP 合同条款并录入飞书 Checklist。 |
+| [**content-broadcast** (内容分发助手)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/content-broadcast) | ✅ 生产可用 | 中 | 中 | 内容多渠道解析与自动化定向广播分发。 |
+| [**billing-config-error** (账单纠错工具)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/billing-config-error) | ✅ 生产可用 | 中 | 低 | 账单系统重复配置纠错与故障链路追踪。 |
+| [**agent-proxy-communication** (代理通信协议)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/agent-proxy-communication) | 🚧 调试中 | 中 | 高 | 解决跨 Agent 协作时的身份识别问题。 |
+| [**feishu-crm-automation** (飞书自动化提交工单)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-crm-automation) | 🚧 开发中 | 高 | 低 | 自动化执行飞书 aPaaS 工单的静默创建与状态轮询。 |
+| [**wewe-rss-add-feed** (微信采集助手)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/wewe-rss-add-feed) | ✅ 生产可用 | 中 | 低 | 自动化添加与查询微信公众号到 `wewe-rss` 监控库，支持智能分流。 |
 
 ## 外部常用技能 (第三方)
 
