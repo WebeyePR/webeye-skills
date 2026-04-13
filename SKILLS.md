@@ -19,6 +19,7 @@
 | [**agent-proxy-communication** (代理通信协议)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/agent-proxy-communication) | 🚧 调试中 | 中 | 高 | 解决跨 Agent 协作时的身份识别问题。 |
 | [**feishu-crm-automation** (飞书自动化提交工单)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/feishu-crm-automation) | 🚧 开发中 | 高 | 低 | 自动化执行飞书 aPaaS 工单的静默创建与状态轮询。 |
 | [**wewe-rss-add-feed** (微信采集助手)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/wewe-rss-add-feed) | ✅ 生产可用 | 中 | 低 | 自动化添加与查询微信公众号到 `wewe-rss` 监控库，支持智能分流。 |
+| [**ai-daily-digest** (AI 每日资讯)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/ai-daily-digest) | ✅ 生产可用 | 低 | 高 | 统一采集 AI 新闻简报与产品发布，跨源去重排序，生成含趋势分析的每日报告。 |
 
 ## 外部常用技能 (第三方)
 
