@@ -47,7 +47,7 @@ license: MIT
 
 ## ⚡ 二、业务意图分发路由 (Workflow Routing)
 系统根据触发前缀自动加载对应的业务逻辑：
-1. **🚀 极速跟轨 (Follow-up)**：口令以 `素材：`、`跟进：`、`提单：` 等开头。
+1. **🚀 极速跟轨 (Follow-up)**：口令以 `素材：`、`跟进：`、`跟进记录：` 等开头。
    - **加载参考件**：[workflow-crm-record.md](file:///Users/apple/Project/Git/webeye-skills/skills/feishu-crm-copilot/references/workflow-crm-record.md)
 2. **🛡️ 客户建档 (Customer)**：口令以 `新客户：`、`客户报备：` 等开头。
    - **加载参考件**：[workflow-crm-customer.md](file:///Users/apple/Project/Git/webeye-skills/skills/feishu-crm-copilot/references/workflow-crm-customer.md)
