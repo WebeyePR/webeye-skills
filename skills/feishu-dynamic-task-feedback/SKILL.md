@@ -9,6 +9,9 @@ license: MIT
 
 # [SKILL] 飞书消息进度条
 
+![Agent Skills](https://img.shields.io/badge/Skill-飞书专属-blue)
+![Status](https://img.shields.io/badge/Status-稳定-success)
+
 ## 🚫 运行时防御与隔离铁律 (Critical Enforcement)
 
 **🚨 警告：AI 接管本技能后的首要任务是“动作对齐”而非“逻辑输出”。**

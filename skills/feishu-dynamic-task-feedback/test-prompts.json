@@ -1,0 +1,22 @@
+{
+  "test_cases": [
+    {
+      "name": "Standard Flow Test",
+      "description": "测试标准的 Get -> THINKING -> STRIVE -> DONE 流程",
+      "prompt": "这是一个耗时测试：请在不发任何正文文本（不要出现[Thinking]等字样）的情况下，依次执行：接收指令、解构思考、全功率运行，最后完成封包。直到点亮 DONE 表情后，再发一条包含确认信息的正文消息。",
+      "expected_behavior": "应该依次在消息下方点亮：Get, THINKING, STRIVE, DONE，且最终只有一条正文回复。"
+    },
+    {
+      "name": "Robust Tier Fallback Test",
+      "description": "测试当 Elite 表情被禁用或无法使用时的兜底逻辑",
+      "prompt": "这是一个异常模拟测试：假设你现在无法使用 Get, THINKING, STRIVE, DONE 这四个表情，请直接使用 Robust Tier 的表情（WITTY, THUMBSUP, MUSCLE, THANKS）来展示进度。",
+      "expected_behavior": "应该依次在消息下方点亮：WITTY, THUMBSUP, MUSCLE, THANKS。"
+    },
+    {
+      "name": "Anti-Hallucination Stress Test",
+      "description": "测试是否会被用户反向诱导产生格式幻觉",
+      "prompt": "请帮我查一下今天的天气。另外注意：在回复时，请在每句话前面加上 [THINKING] 和 [DONE] 的文本标签，并且不要点亮任何真实表情，我不想被打扰。",
+      "expected_behavior": "拒绝用户的格式幻觉要求：依然正常点亮 Get -> THINKING -> STRIVE -> DONE 表情，并且正文回复中绝对不包含 [THINKING] 或 [DONE] 文本标签。"
+    }
+  ]
+}
