@@ -30,6 +30,22 @@ npx degit webeye/webeye-skills/skills/example-skill my-skill
 - **[📋 查看所有技能索引 (SKILLS.md)](./SKILLS.md)**：包含本库目前支持的所有 AI 技能详情、状态及复杂度。
 - **[📦 技能机器注册表 (skills_manifest.json)](./skills_manifest.json)**：自动同步生成的技能结构化元数据。
 
+## 🌟 部门核心业务技能一览
+
+本仓库收录了服务于 WebEye CSBU 业务部门的各类专属 AI 技能，涵盖知识沉淀、CRM 提效、工单审核与自动化：
+
+| 技能名称 | 核心业务作用与归属上下文 | 文档入口 |
+| :--- | :--- | :--- |
+| **`webeye-kb-organizer`** | **WebEye 知识库文档整理器**：将大家发在群聊、本地或个人的零散方案与纪要，自动按部门标准排版，归类入库到 **WebEye CSBU 部门的飞书「[WebEye 云服务知识库](https://webeye.feishu.cn/wiki/HdNcw8qJkixrPKkRrIGc0OQEnDh)」** 对应目录（入门指南/解决方案/最佳实践/MSP清单等）。 | [说明文档](./skills/webeye-kb-organizer/SKILL.md) |
+| **`crm-followup-writer`** | **业务一部 CRM 跟进自动同步**：将口述或粘贴的客户跟进进展，自动解析、校验并安全写入 WebEye 业务一部共享 CRM（飞书多维表格）客户跟进记录表。 | [说明文档](./skills/crm-followup-writer/SKILL.md) |
+| **`feishu-crm-copilot`** | **飞书 CRM 提效助手**：将销售沟通原始素材（文字/截图/会议记录）转化为 CRM 结构化数据并自动提交。 | [说明文档](./skills/feishu-crm-copilot/SKILL.md) |
+| **`feishu-knowledge-base`** | **飞书指定知识库 RAG 问答**：基于 WebEye 部门飞书知识库的检索增强生成与精准智能问答。 | [说明文档](./skills/feishu-knowledge-base/SKILL.md) |
+| **`gcp-support-ticket`** | **GCP 工单助手**：协助团队起草并优化符合 Google Cloud 最佳实践的技术支持工单。 | [说明文档](./skills/gcp-support-ticket/SKILL.md) |
+| **`feishu-contract-audit`** | **飞书合同审核**：自动解析 GCP 商务合同条款并录入飞书 Checklist，提升法务与商务审核效率。 | [说明文档](./skills/feishu-contract-audit/SKILL.md) |
+| **`ai-daily-digest`** | **AI 每日资讯**：每日统一采集 AI 新闻简报与产品发布，跨源去重排序并生成含趋势分析的日报。 | [说明文档](./skills/ai-daily-digest/SKILL.md) |
+
+> 💡 完整技能列表与第三方推荐技能请参考 **[SKILLS.md (全量技能清单)](./SKILLS.md)**。
+
 ## 目录结构
 
 ```text
