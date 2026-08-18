@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Webeye CSBU AI Skills 全局技能元数据注册表",
-  "generated_at": "2026-08-18 11:21:26",
-  "total_skills": 12,
+  "generated_at": "2026-08-18 11:40:49",
+  "total_skills": 13,
   "skills": [
     {
       "name": "agent-proxy-communication",
@@ -98,6 +98,35 @@
       "has_package_json": false,
       "total_files": 1,
       "total_lines": 26
+    },
+    {
+      "name": "crm-followup-writer",
+      "path": "skills/crm-followup-writer",
+      "has_skill_md": true,
+      "title": "业务一部CRM跟进自动同步",
+      "description": "将用户口述或粘贴的客户跟进进展，自动写入 WebEye 业务一部共享 CRM（飞书多维表格「🥳业务一部CRM-2026」的客户跟进记录表）。当用户描述\"客户 XXX 同步\"、粘贴跟进内容（含下一步/任务执行者/沟通对象等要素）时触发。Skill 内置字段映射、客户简称→record_id 解析、人员 open_id 解析、必填校验与用户身份权限管控（仅用 --as user 写入当前用户的跟进，不越权访问其他业务线数据）。",
+      "version": "1.0.0",
+      "author": "Webeye CSBU Team",
+      "license": "MIT",
+      "alwaysActive": false,
+      "status": "生产可用",
+      "complexity": "中",
+      "reusability": "高",
+      "category": "未分类",
+      "scripts": [
+        "scripts/write_followup.py"
+      ],
+      "references": [
+        "references/examples.md",
+        "references/fields.md"
+      ],
+      "tests": [],
+      "has_env_example": false,
+      "has_requirements": false,
+      "has_package_json": false,
+      "total_files": 4,
+      "total_lines": 710,
+      "label": "业务一部CRM跟进自动同步"
     },
     {
       "name": "example-skill",
