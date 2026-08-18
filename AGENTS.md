@@ -81,16 +81,18 @@ reusability: 高                 # 选填：高 | 中 | 低 (默认：高)
 
 1. **🔒 范围隔离原则 (Scope Isolation)**
    - 聚焦于目标技能的开发与维护，**严禁跨技能随意篡改其他成员的技能文件**。
-2. **🛡️ 零泄密原则 (Zero-Leakage Policy)**
+2. **🚫 严禁擅自篡改技能内容 (No Unsolicited Modification)**
+   - 导入、收录或同步技能时，必须完整保留原作者提交的代码、文档与配置，**严禁未经显式允许擅自修改技能正文、改写代码逻辑或强加多余文件**。只有在用户提出明确修改指令时方可调整。
+3. **🛡️ 零泄密原则 (Zero-Leakage Policy)**
    - 严禁在代码、文档或配置中提交 API Key（`sk-`、`AIza` 等）、Token、Secret 或私钥。
    - 敏感配置统一通过环境变量读取，并提供 `.env.example` 模板。
-3. **🚫 环境脱敏 (De-hardcoding)**
+4. **🚫 环境脱敏 (De-hardcoding)**
    - 避免硬编码开发者本机绝对路径（如 `/Users/...`）。推荐使用相对路径或动态环境变量。
-4. **🚦 物理断点与操作安全 (Safety Gate)**
+5. **🚦 物理断点与操作安全 (Safety Gate)**
    - 对外写操作（写入 CRM、群发消息等）建议设置“提取 ➔ 预览拦截 ➔ 显式确认 ➔ 实际执行”的安全断点。
-5. **🧪 物理执行验证 (Mandatory Verification)**
+6. **🧪 物理执行验证 (Mandatory Verification)**
    - 交付前需对新增脚本或逻辑执行真实运行测试或 Dry-run，确保交付质量。
-6. **📝 Agent 自动 Git 提交规范 (Automated Git Commit Format)**
+7. **📝 Agent 自动 Git 提交规范 (Automated Git Commit Format)**
    - **原子化与分类提交原则 (Atomic & Classified Commits)**：
      - 🚫 **严禁跨技能混杂提交**：不同技能的变更必须**拆分为独立的 Commit** 分别提交，严禁在一个提交中同时包含多个技能目录的修改。
      - 🚫 **严禁业务技能与全局基建混杂提交**：运维脚本 (`scripts/`)、测试套件 (`tests/`)、全局文档 (`AGENTS.md` / `README.md`) 及元数据注册表 (`skills_manifest.json`) 的更新必须与具体技能代码分开独立提交。
@@ -104,5 +106,5 @@ reusability: 高                 # 选填：高 | 中 | 低 (默认：高)
      - **运维管理脚本**：`refactor(scripts): 优化管理脚本逻辑`、`feat(scripts): 新增 xxx 运维指令`
      - **规范与全局文档**：`docs(agents): 完善 AGENTS.md 规范说明`、`docs(readme): 更新项目说明文档`
      - **测试套件与用例**：`test(manage_skills): 补充安全扫描测试用例`
-7. **💬 中文注释要求 (Chinese Comments)**
+8. **💬 中文注释要求 (Chinese Comments)**
    - 所有新增或修改的代码、脚本和配置文件，应包含清晰、规范的中文注释。
