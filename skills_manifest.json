@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Webeye CSBU AI Skills 全局技能元数据注册表",
-  "generated_at": "2026-08-18 11:40:49",
-  "total_skills": 13,
+  "generated_at": "2026-08-18 12:08:00",
+  "total_skills": 14,
   "skills": [
     {
       "name": "agent-proxy-communication",
@@ -311,6 +311,29 @@
       "has_package_json": false,
       "total_files": 3,
       "total_lines": 150
+    },
+    {
+      "name": "webeye-kb-organizer",
+      "path": "skills/webeye-kb-organizer",
+      "has_skill_md": true,
+      "title": "WebEye 云服务知识库文档整理器",
+      "description": "将原始文档、笔记、会议纪要或零散内容整理为符合 WebEye 云服务知识库标准格式的文档，并自动判断归类板块。当用户说\"整理到知识库\"、\"做成知识库文档\"、\"归类到云服务知识库\"、\"帮我把这篇文档整理下放到知识库\"，或提供文档链接/内容并要求按知识库格式重组时使用。",
+      "version": "1.0.0",
+      "author": "Webeye CSBU Team",
+      "license": "MIT",
+      "alwaysActive": false,
+      "status": "生产可用",
+      "complexity": "低",
+      "reusability": "高",
+      "category": "未分类",
+      "scripts": [],
+      "references": [],
+      "tests": [],
+      "has_env_example": false,
+      "has_requirements": false,
+      "has_package_json": false,
+      "total_files": 2,
+      "total_lines": 148
     },
     {
       "name": "wechat-daily-monitor",
