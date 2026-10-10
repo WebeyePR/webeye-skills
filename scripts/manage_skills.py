@@ -589,8 +589,8 @@ def run_lint(skills_dir: Path = SKILLS_DIR, target_skill: Optional[str] = None) 
 
             if "version" in meta:
                 version_str = str(meta["version"])
-                if not re.match(r"^\d+\.\d+\.\d+$", version_str):
-                    warnings.append(f"{skill_prefix} version ('{version_str}') 建议遵循严格的 SemVer 格式 (x.y.z)")
+                if not re.match(r"^(\d+\.\d+\.\d+|v\d{8})$", version_str):
+                    warnings.append(f"{skill_prefix} version ('{version_str}') 建议遵循严格的 SemVer (x.y.z) 或 CalVer (vYYYYMMDD) 格式")
 
             if "status" in meta and meta["status"] not in VALID_STATUSES:
                 warnings.append(f"{skill_prefix} 状态 '{meta['status']}' 建议使用标准值之一: {VALID_STATUSES}")
