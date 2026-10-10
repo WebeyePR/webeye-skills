@@ -108,3 +108,24 @@ python3 scripts/query.py --object gemini --stats
 - [`scripts/watch.py`](scripts/watch.py) —— 抓取 + 差分
 - [`scripts/log_change.py`](scripts/log_change.py) —— 记录判断、生成卡片
 - [`scripts/query.py`](scripts/query.py) —— 检索 / 统计
+
+## 版本更新（Changelog）
+
+技能采用 **date-stamp 版本号**（`vYYYYMMDD` 当日首版，同日修复追加 `.N`）。
+
+### v20261010.1 · 2026-10-10
+当日第二版，含三波实质改动（均不影响监控抓取与数据落盘）：
+
+- **【新功能 · v3.1】通知双通道 + 三刀纪律**
+  - 变更通知默认**全级别实时发**（high / normal / low 全部立即发，仅卡片样式区分；`unknown` 仍强制不通知）。
+  - 新增 `--health` **一次性健康跃迁告警**（ok→down / →ok 各告警一次，持续失联静音，去重落盘 `state/health_alerts.json`）。
+  - 新增 `--digest` **每日变更摘要**（北京 00:00 起聚合 + 失败源脚注，空则静默），配置块 `digest` 已被 `watch.py` 白名单接受。
+  - 文档补充「双通道 + 三刀（不重复发 / 空跑静默 / 非噪声才发）」纪律与推荐自动化组合（10h 实时 + 08:30 摘要/健康）。
+- **【修复】变更卡时间丢失**：`_published_for` 兜底链原本只取 `published → latest.json → first_seen`，而生产记录三者皆为 `None`，导致卡片从不显示时间。现回退到永远有值的 `logged_at`（检测时间），每条变更卡恢复「北京时间 MM月DD日 HH:MM」。
+- **【优化】摘要卡信息密度 + 序号**：原摘要直接复用变更卡大块 + 长摘要，密度低、记录间间距过大。改为**统计块 + 紧凑编号列表（1./2./3.…） + 失败源脚注**，记录间间距由 ~28px 收紧到 5px 内边距 + 3px 间隔，去掉「来源 N 个 ·」啰嗦前缀。
+
+> 稳定性加固（同版内）：`source_pairs()` 在记录同时缺 `sources` 与 `url`（旧版/脏落盘）时不再 `KeyError` 崩溃，退化为空列表。
+
+### v20261010 · 2026-10-10
+当日首版，从 AIHOT 框架移植的变更监控能力（对象登记册 + 指纹差分 + 待判队列 + 证据溯源 + 健康三态），详见 [`research/`](../../.workbuddy/research/)（如 `2026-10-10-aihot-capability-audit.md`）。
+

@@ -205,9 +205,17 @@ def label_for(url, label_map):
 
 
 def source_pairs(rec, label_map):
-    """返回 [(中文名, URL)]；名称优先取判断时给的名字，其次按配置映射，最后退化成域名。"""
+    """返回 [(中文名, URL)]；名称优先取判断时给的名字，其次按配置映射，最后退化成域名。
+
+    防御：记录可能缺 sources 也缺 url（旧版/异常落盘），此时退化成空列表而非崩溃，
+    保证摘要/通知卡在任意单条脏数据下不整体失败。
+    """
     out = []
-    for s in (rec.get("sources") or [rec["url"]]):
+    srcs = rec.get("sources")
+    if not srcs:
+        u = rec.get("url")
+        srcs = [u] if u else []
+    for s in srcs:
         if isinstance(s, dict):
             u = s.get("url", "")
             if u:
@@ -220,6 +228,12 @@ def source_pairs(rec, label_map):
 def source_line(rec, label_map):
     pairs = source_pairs(rec, label_map)
     return "来源 %d 个 · %s" % (len(pairs), " · ".join("[%s](%s)" % p for p in pairs))
+
+
+def _src_names(rec, label_map):
+    """摘要紧凑行用的来源展示：只列来源名链接，不带『来源 N 个』前缀。"""
+    pairs = source_pairs(rec, label_map)
+    return " · ".join("[%s](%s)" % p for p in pairs) or rec.get("target", "?")
 
 
 # ---------- 时间：拿到就显示，精度按「日 / 分」自适应 ----------
@@ -293,36 +307,16 @@ def _published_for(rec, ws):
                 return c.get("published") or c.get("first_seen")
         except (OSError, ValueError):
             pass
-    return rec.get("first_seen")
+    # 回退到检测时间：每条落盘记录都带 logged_at，保证卡片永远有时间、不静默丢信息
+    return rec.get("first_seen") or rec.get("logged_at")
 
 
-def build_card(ws, records, run_at, mention=None):
-    """把判断结果渲染成飞书 interactive 卡片（Card 2.0）。
+def _record_blocks(ws, recs):
+    """把变更记录渲染成交互容器元素列表（含末尾扫描统计行）。
 
-    标题、中文标签、来源合并、末尾统计全部在这里定死，上层拿到的是可直接发送的卡片。
-    结构说明见 references/notify-card.md。
-
-    mention：传入 notify.mention 配置（"all" 或 [open_id,...]）时，若本卡含高优变更，
-    顶部加「⚠️ 重要变更，请关注 <at>」横幅，并把卡片头染红——用于发到群聊强提醒。
+    纯展示逻辑，不含标题/头部——供 build_card / build_digest_card 复用。
+    recs 应为已按重要性排序的列表。
     """
-    recs = sorted(records, key=lambda r: SIG_ORDER.get(r.get("significance"), 9))
-    targets = {r.get("target") for r in recs}
-    title = (target_display_name(ws, recs[0]["target"]) + " 监控简报"
-             if len(targets) == 1 else "监控简报")
-
-    # 轮次统计（来自最近一次抓取，用于末尾那行）
-    stats = ""
-    try:
-        with open(os.path.join(ws, "out", "latest.json"), "r", encoding="utf-8") as fh:
-            latest = json.load(fh)
-        s = latest.get("summary", {})
-        stale = latest.get("stale_sources", [])
-        names = "、".join(x.get("label", x.get("source_id", "?")) for x in stale) or "无"
-        stats = "扫描 %s 个来源 · 抓取失败 %s · 停更 %d（%s）" % (
-            s.get("sources", "?"), s.get("sources_failed", "?"), len(stale), names)
-    except (OSError, ValueError):
-        pass
-
     elements = []
     label_map = source_label_map(ws)
     shown = recs if len(recs) <= 5 else [r for r in recs if r.get("significance") != "low"]
@@ -361,9 +355,94 @@ def build_card(ws, records, run_at, mention=None):
                          "content": "<font color='grey'>另有 %d 条次要变更，见明细。</font>"
                                     % (len(recs) - len(shown)),
                          "text_size": "notation"})
+    # 末尾扫描统计（来自最近一次抓取；与 build_status_card 同源）
+    stats = ""
+    try:
+        with open(os.path.join(ws, "out", "latest.json"), "r", encoding="utf-8") as fh:
+            latest = json.load(fh)
+        s = latest.get("summary", {})
+        stale = latest.get("stale_sources", [])
+        names = "、".join(x.get("label", x.get("source_id", "?")) for x in stale) or "无"
+        stats = "扫描 %s 个来源 · 抓取失败 %s · 停更 %d（%s）" % (
+            s.get("sources", "?"), s.get("sources_failed", "?"), len(stale), names)
+    except (OSError, ValueError):
+        pass
     if stats:
         elements.append({"tag": "markdown", "content": "<font color='grey'>%s</font>" % stats,
                          "text_size": "notation"})
+    return elements
+
+
+def _digest_rows(ws, recs):
+    """摘要卡专用紧凑列表：每条一行（序号 + 标签 + 标题 / 来源·类型·时间），不放长摘要。
+
+    摘要定位是『一眼扫完本时段全貌』，信息密度优先；逐条长说明留给实时变更卡。
+    recs 应为已按重要性排序的列表。
+
+    整段列表收进一个无边框外层容器，使 build_digest_card 的 12px 块间距只作用于
+    『统计块↔列表』『列表↔失败源』之间，记录之间改用 3px 紧间距，避免密度过低。
+    """
+    label_map = source_label_map(ws)
+    rows = []
+    shown = recs if len(recs) <= 20 else recs[:20]
+    n = len(shown)
+    for i, rec in enumerate(shown):
+        seq = i + 1
+        tags = []
+        k = KIND_STYLE.get(rec.get("change_kind"))
+        if k:
+            tags.append("<text_tag color='%s'>%s</text_tag>" % (k[1], k[0]))
+        sig = SIG_STYLE.get(rec.get("significance"))
+        if sig:
+            tags.append("<text_tag color='%s'>%s</text_tag>" % (sig[1], sig[0]))
+        meta = "%s · %s" % (_src_names(rec, label_map), rec.get("type", ""))
+        ts = _fmt_cn_time(_published_for(rec, ws))
+        if ts:
+            meta = "%s · %s" % (meta, ts)
+        tag_str = (" ".join(tags) + " ") if tags else ""
+        # 序号 1. 2. 3. 前置，加粗标题，标签内联
+        title_md = "**%d.** %s**%s**" % (seq, tag_str, rec.get("title", ""))
+        row = {
+            "tag": "interactive_container", "width": "fill", "has_border": True,
+            "border_color": "blue-100", "corner_radius": "6px", "background_style": "blue-50",
+            "padding": "5px 10px 5px 10px", "vertical_spacing": "1px",
+            "elements": [
+                {"tag": "markdown", "content": title_md},
+                {"tag": "markdown",
+                 "content": "<font color='grey'>%s</font>" % meta,
+                 "text_size": "notation"},
+            ],
+        }
+        if i != n - 1:
+            row["margin"] = "0px 0px 3px 0px"
+        rows.append(row)
+    if len(shown) < len(recs):
+        rows.append({"tag": "markdown",
+                     "content": "<font color='grey'>另有 %d 条变更，见各实时通知卡。</font>"
+                                % (len(recs) - len(shown)),
+                     "text_size": "notation"})
+    # 外层无边框容器包裹，隔离 build_digest_card 的整块 12px 间距
+    return [{
+        "tag": "interactive_container", "width": "fill", "vertical_spacing": "0px",
+        "elements": rows,
+    }]
+
+
+def build_card(ws, records, run_at, mention=None):
+    """把判断结果渲染成飞书 interactive 卡片（Card 2.0）。
+
+    标题、中文标签、来源合并、末尾统计全部在这里定死，上层拿到的是可直接发送的卡片。
+    结构说明见 references/notify-card.md。
+
+    mention：传入 notify.mention 配置（"all" 或 [open_id,...]）时，若本卡含高优变更，
+    顶部加「⚠️ 重要变更，请关注 <at>」横幅，并把卡片头染红——用于发到群聊强提醒。
+    """
+    recs = sorted(records, key=lambda r: SIG_ORDER.get(r.get("significance"), 9))
+    targets = {r.get("target") for r in recs}
+    title = (target_display_name(ws, recs[0]["target"]) + " 监控简报"
+             if len(targets) == 1 else "监控简报")
+
+    elements = _record_blocks(ws, recs)
 
     head_tags = [{"tag": "text_tag", "text": {"tag": "plain_text",
                                               "content": "%d 条变更" % len(recs)}, "color": "blue"}]
@@ -433,6 +512,30 @@ def _status_title(ws):
     if len(tlist) == 1:
         return (tlist[0].get("short_name") or tlist[0].get("name") or tlist[0].get("id")) + " 监控简报"
     return "监控简报"
+
+
+def _failed_source_rows(ws):
+    """返回本轮抓取失败源的 markdown 行列表（"- 名称（已持续 Xh）"）；无失败返回 []。
+
+    供 build_status_card 与 build_digest_card 复用，避免重复写失败源渲染。
+    """
+    try:
+        with open(os.path.join(ws, "out", "latest.json"), "r", encoding="utf-8") as fh:
+            latest = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    failed = [x for x in latest.get("sources", []) if not x.get("ok")]
+    if not failed:
+        return []
+    by_id = {x.get("source_id"): x for x in latest.get("sources", []) if x.get("source_id")}
+    rows = []
+    for x in failed:
+        sid = x.get("source_id")
+        label = str(x.get("label", sid))
+        fh_h = x.get("failing_hours")
+        suf = "（已持续 %sh）" % int(fh_h) if isinstance(fh_h, (int, float)) else ""
+        rows.append("- " + _src_link(by_id, sid, label, suf))
+    return rows
 
 
 def _derive_home(url):
@@ -508,14 +611,10 @@ def build_status_card(ws, run_at):
             rows.append("- " + _src_link(by_id, sid, label, suf))
         anomaly.append("**停更源（%d）**（已成功抓取 · 对方长期未更新）：\n%s"
                         % (len(stale), "\n".join(rows)))
-    if failed:
-        rows = []
-        for x in failed:
-            sid = x.get("source_id")
-            label = str(x.get("label", sid))
-            rows.append("- " + _src_link(by_id, sid, label))
+    failed_rows = _failed_source_rows(ws)
+    if failed_rows:
         anomaly.append("**抓取失败（%d）**（本次无法连接该源 · 非停更）：\n%s"
-                        % (len(failed), "\n".join(rows)))
+                       % (len(failed_rows), "\n".join(failed_rows)))
     if anomaly:
         # 每节各自独立成一个 markdown 元素 —— 不能把两节用单个换行拼进同一元素：
         # 飞书 markdown 会把「- 列表项」紧接着的下一行当作该列表项的续行（lazy
@@ -563,6 +662,266 @@ def build_status_card(ws, run_at):
         },
         "body": {"direction": "vertical", "padding": "12px 12px 20px 12px", "elements": blocks},
     }
+
+
+def digest_config(ws):
+    """读取 targets.json 顶层 digest 块（每日摘要配置）。读不到返回 {}。"""
+    try:
+        with open(os.path.join(ws, "targets.json"), "r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    d = cfg.get("digest") or {}
+    return d if isinstance(d, dict) else {}
+
+
+def _changes_since(ws, start_dt):
+    """读取 log/changes.jsonl，返回 logged_at（北京时间）>= start_dt 的变更记录。"""
+    out = []
+    path = os.path.join(ws, "log", "changes.jsonl")
+    if not os.path.exists(path):
+        return out
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            la = rec.get("logged_at")
+            if not la:
+                continue
+            dt = _parse_time(la)
+            if dt is None:
+                continue
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(BEIJING)
+            if dt >= start_dt:
+                out.append(rec)
+    return out
+
+
+def build_digest_card(ws, records, run_at, window_label):
+    """每日变更摘要卡：聚合窗口内全部已判定变更，按严重度/目标/类型统计，附当前不可用源。
+
+    records：窗口内变更（dict 列表，已含 significance/target/type）。空列表返回 None，
+    调用方据此静默。
+    """
+    if not records:
+        return None
+    recs = sorted(records, key=lambda r: SIG_ORDER.get(r.get("significance"), 9))
+
+    by_sig, by_target, by_type = {}, {}, {}
+    for r in recs:
+        k = r.get("significance", "?")
+        by_sig[k] = by_sig.get(k, 0) + 1
+        t = r.get("target", "?")
+        by_target[t] = by_target.get(t, 0) + 1
+        y = r.get("type", "?")
+        by_type[y] = by_type.get(y, 0) + 1
+
+    def _sig_label(k):
+        return SIG_STYLE.get(k, (str(k),))[0]
+    sig_line = " · ".join("%s %d" % (_sig_label(k), by_sig[k])
+                          for k in sorted(by_sig, key=lambda x: SIG_ORDER.get(x, 9)))
+    target_line = "、".join("%s %d" % (target_display_name(ws, t), n)
+                            for t, n in by_target.items()) or "无"
+    type_line = "、".join("%s %d" % (k, n) for k, n in
+                          sorted(by_type.items(), key=lambda kv: -kv[1])) or "无"
+    summary_md = "**本时段变更 %d 条** ［%s］\n按目标：%s\n按类型：%s" % (
+        len(recs), sig_line, target_line, type_line)
+
+    blocks = [{
+        "tag": "interactive_container", "width": "fill", "has_border": True,
+        "border_color": "blue-100", "corner_radius": "8px", "background_style": "blue-50",
+        "padding": "12px 12px 12px 12px", "vertical_spacing": "4px",
+        "elements": [{"tag": "markdown", "content": summary_md}],
+    }]
+    blocks += _digest_rows(ws, recs)
+
+    failed_rows = _failed_source_rows(ws)
+    if failed_rows:
+        blocks.append({
+            "tag": "interactive_container", "width": "fill", "has_border": True,
+            "border_color": "yellow-100", "corner_radius": "8px", "background_style": "yellow-50",
+            "padding": "12px 12px 12px 12px", "vertical_spacing": "8px",
+            "elements": [{"tag": "markdown",
+                          "content": "**当前不可用源（%d）**（本次无法连接该源 · 非停更）：\n%s"
+                                     % (len(failed_rows), "\n".join(failed_rows))}],
+        })
+
+    for i, b in enumerate(blocks):
+        if i != len(blocks) - 1:
+            b["margin"] = "0px 0px 12px 0px"
+
+    return {
+        "schema": "2.0",
+        "config": _status_card_config(),
+        "header": {
+            "title": {"tag": "plain_text", "content": "每日变更摘要"},
+            "subtitle": {"tag": "plain_text", "content": "%s · %s" % (window_label, run_at)},
+            "template": "blue",
+            "icon": {"tag": "standard_icon", "token": "calendar_clock_outlined", "color": "blue"},
+            "text_tag_list": [{"tag": "text_tag",
+                               "text": {"tag": "plain_text", "content": "%d 条变更" % len(recs)},
+                               "color": "blue"}],
+        },
+        "body": {"direction": "vertical", "padding": "12px 12px 20px 12px", "elements": blocks},
+    }
+
+
+def _cmd_digest(ws):
+    """生成每日变更摘要卡：聚合「自北京今日 00:00 起」已判定的全部变更 + 当前不可用源。
+
+    今日 0 变更 → 完全静默（不产卡片、不发送）。digest.enabled=false 时跳过。
+    """
+    cfg = digest_config(ws)
+    if not cfg.get("enabled", True):
+        print("摘要已禁用（digest.enabled=false），跳过。")
+        return 0
+    include_low = bool(cfg.get("include_low", True))
+    now = datetime.datetime.now(BEIJING)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    window_label = "北京时间 %d月%d日 00:00 至今" % (start.month, start.day)
+    recs = _changes_since(ws, start)
+    if not include_low:
+        recs = [r for r in recs if r.get("significance") != "low"]
+    if not recs:
+        print("今日（%s）无变更，摘要静默。" % window_label)
+        return 0
+    card = build_digest_card(ws, recs, beijing_now_str(), window_label)
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    card_path = os.path.join(ws, "out", "card-digest-%s.json" % stamp)
+    with open(card_path, "w", encoding="utf-8") as fh:
+        json.dump(card, fh, ensure_ascii=False, indent=2)
+    print("每日变更摘要卡片：%s" % card_path)
+    uid = notify_config(ws).get("user_id")
+    if uid:
+        print("  lark-cli im +messages-send --as bot --user-id %s "
+              "--msg-type interactive --content - < %s" % (uid, card_path))
+    else:
+        print("  （未配置私信目标 notify.user_id，跳过私信；如需私信请配置）")
+    return 0
+
+
+def build_health_card(alerts, run_at):
+    """源健康跃迁告警卡：alerts 为 [(label, kind, failing_hours), ...]，kind∈{down,ok}。"""
+    lines = []
+    for label, kind, fh_h in alerts:
+        if kind == "down":
+            suf = "（已持续 %sh）" % int(fh_h) if isinstance(fh_h, (int, float)) else ""
+            lines.append("- ⚠️ **%s** 不可用%s" % (label, suf))
+        else:
+            lines.append("- ✅ **%s** 已恢复" % label)
+    block = {
+        "tag": "interactive_container", "width": "fill", "has_border": True,
+        "border_color": "yellow-100", "corner_radius": "8px", "background_style": "yellow-50",
+        "padding": "12px 12px 12px 12px", "vertical_spacing": "8px",
+        "elements": [{"tag": "markdown",
+                      "content": "**监控源健康跃迁**\n" + "\n".join(lines)}],
+    }
+    downs = sum(1 for a in alerts if a[1] == "down")
+    ups = sum(1 for a in alerts if a[1] == "ok")
+    head_tags = []
+    if downs:
+        head_tags.append({"tag": "text_tag",
+                          "text": {"tag": "plain_text", "content": "%d 不可用" % downs}, "color": "red"})
+    if ups:
+        head_tags.append({"tag": "text_tag",
+                          "text": {"tag": "plain_text", "content": "%d 已恢复" % ups}, "color": "green"})
+    return {
+        "schema": "2.0",
+        "config": _status_card_config(),
+        "header": {
+            "title": {"tag": "plain_text", "content": "监控源健康"},
+            "subtitle": {"tag": "plain_text", "content": "%s · 自动巡检" % run_at},
+            "template": "red" if downs else "blue",
+            "icon": {"tag": "standard_icon", "token": "warning_outlined", "color": "blue"},
+            "text_tag_list": head_tags,
+        },
+        "body": {"direction": "vertical", "padding": "12px 12px 20px 12px",
+                 "elements": [block]},
+    }
+
+
+def _cmd_health(ws):
+    """对源健康跃迁发一次性告警：ok→down / →ok 各一次；持续失联（无新跃迁）静音。
+
+    去重依据：out/latest.json 里每个源本轮的 health_transition 字段本身就只在
+    状态真正变化那一轮出现（稳定态不会有该字段），所以同一持续故障不会反复告警。
+    再用 state/health_alerts.json 记已告警的跃迁串，防止对同一份 latest.json 重复
+    跑 --health 时重复发。flapping 等中间态不告警。
+    """
+    try:
+        with open(os.path.join(ws, "out", "latest.json"), "r", encoding="utf-8") as fh:
+            latest = json.load(fh)
+    except (OSError, ValueError):
+        print("无 out/latest.json，跳过健康告警。", file=sys.stderr)
+        return 0
+    sources = latest.get("sources", [])
+    alert_state_path = os.path.join(ws, "state", "health_alerts.json")
+    try:
+        with open(alert_state_path, "r", encoding="utf-8") as fh:
+            alerted = json.load(fh)
+    except (OSError, ValueError):
+        alerted = {}
+    if not isinstance(alerted, dict):
+        alerted = {}
+
+    alerts = []
+    for s in sources:
+        trans = s.get("health_transition")
+        if not trans:
+            continue
+        sid = s.get("source_id")
+        # 跃迁串形如 "ok → down" / "flapping → ok"（watch.py 用空格包裹箭头）。
+        # 只关心「新状态」（串尾那个词）：down=不可用，ok=已恢复，其余（flapping 等）静音。
+        # 不按箭头字符精确匹配——箭头写法变动也不影响判断。
+        new_state = trans.split()[-1] if trans.split() else ""
+        if new_state == "down":
+            if alerted.get(sid) != trans:
+                alerts.append((str(s.get("label", sid)), "down", s.get("failing_hours"), trans))
+                alerted[sid] = trans
+        elif new_state == "ok":
+            if alerted.get(sid) != trans:
+                alerts.append((str(s.get("label", sid)), "ok", None, trans))
+                alerted[sid] = trans
+        else:
+            # flapping 等中间态不告警；清掉旧记录，未来再发生能重新告警
+            alerted.pop(sid, None)
+
+    if not alerts:
+        # 静音：仅写回（清掉 flapping 标记），不产卡片、不发送
+        try:
+            os.makedirs(os.path.dirname(alert_state_path), exist_ok=True)
+            with open(alert_state_path, "w", encoding="utf-8") as fh:
+                json.dump(alerted, fh, ensure_ascii=False, indent=2)
+        except OSError as e:
+            print("写入健康告警状态失败：%s" % e, file=sys.stderr)
+        print("无健康跃迁需告警（持续失联源已在上次告警，静音）。")
+        return 0
+
+    card = build_health_card([(a[0], a[1], a[2]) for a in alerts], beijing_now_str())
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    card_path = os.path.join(ws, "out", "card-health-%s.json" % stamp)
+    with open(card_path, "w", encoding="utf-8") as fh:
+        json.dump(card, fh, ensure_ascii=False, indent=2)
+    print("监控源健康告警卡片：%s" % card_path)
+    uid = notify_config(ws).get("user_id")
+    if uid:
+        print("  lark-cli im +messages-send --as bot --user-id %s "
+              "--msg-type interactive --content - < %s" % (uid, card_path))
+    else:
+        print("  （未配置私信目标 notify.user_id，跳过私信；如需私信请配置）")
+    try:
+        os.makedirs(os.path.dirname(alert_state_path), exist_ok=True)
+        with open(alert_state_path, "w", encoding="utf-8") as fh:
+            json.dump(alerted, fh, ensure_ascii=False, indent=2)
+    except OSError as e:
+        print("写入健康告警状态失败：%s" % e, file=sys.stderr)
+    return 0
 
 
 def now_iso():
@@ -623,6 +982,10 @@ def main():
     ap.add_argument("--status-card", action="store_true",
                    help="生成扫描状态简报卡片（无变更/有异常时知会；读取最近一次 out/latest.json）")
     ap.add_argument("--show", action="store_true", help="打印最近 20 条")
+    ap.add_argument("--digest", action="store_true",
+                   help="生成每日变更摘要卡片（聚合窗口内变更 + 当前不可用源；今日无变更则静默）")
+    ap.add_argument("--health", action="store_true",
+                   help="对源健康跃迁（不可用/已恢复）发一次性告警；持续失联静音")
     args = ap.parse_args()
 
     ws = os.path.abspath(os.path.expanduser(args.workspace))
@@ -681,6 +1044,12 @@ def main():
             print("  lark-cli im +messages-send --as bot --chat-id %s "
                   "--msg-type interactive --content - < %s" % (chat_id, gpath))
         return 0
+
+    if args.digest:
+        return _cmd_digest(ws)
+
+    if args.health:
+        return _cmd_health(ws)
 
     if not args.input:
         print("需要 --input 或 --show", file=sys.stderr)
@@ -742,7 +1111,9 @@ def main():
         if rec["significance"] == "unknown":
             rec["notify"] = False          # 没判断过就不许发
         else:
-            rec.setdefault("notify", rec["significance"] == "high")
+            # high/normal/low 默认都通知（实时性：变更不拖延，摘要与变更分开、
+            # 变更全级别正常发）。AI 仍可显式写 notify:false 把某条标记为"落盘但不发"。
+            rec.setdefault("notify", True)
         # 证据可查：说明里的版本号/日期/价格必须能在原文里找到，找不到就留痕
         src = src_texts.get(cid, "")
         if src:

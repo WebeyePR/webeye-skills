@@ -2,7 +2,7 @@
 name: change-watch
 description: 监控指定目标（公司/产品线/模型）的变更并沉淀为可查询的变更流水。适用于：想知道某公司最近发布了什么/下架了什么/改了什么价；要给某个产品线做持续变更监控并定时通知；要按时间线、类型、对象查看与检索历史变更并溯源到原文；需要"先分析判断再通知"，而不是把原文直接转发。触发场景举例："Google 最近有什么更新"、"盯着 Gemini 的模型上下架"、"这类变更定时推给我"、"上次那个模型的变更记录在哪"。
 description_en: Monitor changes of a target (company / product line / model) and accumulate them into a queryable change ledger. Use when you want to know what a company recently released / discontinued / repriced; run continuous change monitoring for a product line with scheduled notifications; retrieve and trace historical changes by timeline, type, or object back to the source; and "analyze-then-notify" rather than forwarding raw text. Trigger examples: "What's new from Google", "Watch Gemini's model additions/removals", "Push these changes to me on a schedule", "Where's the change record for that model".
-version: v20261010
+version: v20261010.1
 license: MIT
 agent_created: true
 ---
@@ -166,6 +166,16 @@ python3 <技能目录>/scripts/log_change.py --input judged.json
 `*-group.json` 并发群 @。`mention` 取值 `all`（@所有人，需群主在群设置开「@所有人」权限）
 或 `[open_id, ...]`（@ 指定人）。群 `chat_id` 用 `lark-cli im +chat-search --query 群名` 查。
 
+**通知纪律（双通道 + 三刀）**：本技能把"通知"拆成两条相互独立的通道，互不干扰：
+
+1. **变更通知（实时 · 全级别）**：`log_change.py` 落盘时，凡 `notify:true` 的条目**当场发**（按目标分别发卡）。`high`/`normal`/`low` 默认都通知（实时性：变更不拖延，摘要与变更分开、变更全级别正常发）；`unknown` 强制不通知；AI 显式写 `notify:false` 才抑制。级别只影响卡片样式（红头 / @），不影响"发不发"。
+2. **每日变更摘要（默认开启 · 增强项）**：`python3 scripts/log_change.py --digest` 聚合**自北京今日 00:00 起**已判定的全部变更（按严重度 / 目标 / 类型统计），并附当前不可用源，单卡回顾。今日 0 变更则**完全静默**。默认每天 **08:30** 由宿主自动化跑一次（配置见 `targets.json` 的 `digest` 块：`enabled` 默认 `true`、`send_window` 仅提示、`include_low` 控制是否含次要变更）。
+3. **源健康一次性告警**：`python3 scripts/log_change.py --health` 只对**源健康跃迁**发一次——`ok→down`（不可用）与 `→ok`（已恢复）各一次；持续失联（稳定态无跃迁）**静音**，不会每轮刷屏；`flapping` 等中间态不告警。去重靠 `state/health_alerts.json`，对同一份 `latest.json` 重复跑也不会重发。
+
+三刀（防打扰，不是防通知）：**不重复发**（变更按 `change_id` 幂等去重；健康告警按跃迁去重，同一持续故障只响一次）、**空跑别发**（0 条可通知变更 → 完全静默，连状态卡都不发）、**噪声别发**（只有判为「非真变更」`discard` 才不进流水；`low` 是真·小变更，照常通知，`low`≠噪声）。
+
+> `python3 scripts/log_change.py --status-card` 仍保留：它是「无变更但你想看完整健康全景」时的按需变体（停更 + 抓取失败分两节独立呈现，已修过飞书 lazy-continuation 渲染坑）。日常无需主动跑它。
+
 ### 第 5 步：查看与检索（随时）
 
 ```bash
@@ -199,6 +209,7 @@ python3 <技能目录>/scripts/log_change.py --show         # 最近 20 条
 
 1. 抓取与差分：运行 `python3 <技能目录>/scripts/watch.py`。
    退出码 1 = 配置错误（看 stderr 并报告，不要静默）；退出码 2 = 有源失败但仍有结果，或 `log_change.py` 本轮判断不完整/有非法记录（覆盖度缺失、判断记录格式非法，pending 已保留、下轮再问）——这两种都继续后续，不要中止整条流水线。
+1.5 源健康一次性告警：运行 `python3 <技能目录>/scripts/log_change.py --health`（读本轮 latest.json 的跃迁；不可用/已恢复各发一次，持续失联静音；无跃迁则静默）。按 references/notify-card.md 降级链发私信（群聊可不发，避免刷屏）。
 2. 读 <工作区>/out/latest.json 的 summary：
    - total == 0 且 health.down 为空、stale_sources 为空 → 本轮干净，结束（默认不发卡、不打扰）。
    - total == 0 但存在失败/停更源 → 运行 `python3 <技能目录>/scripts/log_change.py --status-card` 生成状态简报卡，按 references/notify-card.md 降级链发送（私信；若有抓取失败源会额外产出群卡，一并发群 @）。
@@ -222,6 +233,13 @@ python3 <技能目录>/scripts/log_change.py --show         # 最近 20 条
 ```
 
 > 兜底方案只完成"抓取"段；判断 + 通知仍需 AI 工具读 `out/latest.json` 后跑上面的第 3–5 步。
+
+**推荐的自动化组合**（宿主工具按此建两条定时任务即可）：
+
+- **实时通道（间隔巡检）**：每 10 小时（或 30 分钟）跑一遍上面模板的第 1–5 步——`watch.py` → `--health` → 判断 → `log_change.py --input` → 发送。变更全级别实时发，源健康跃迁一次性告警。
+- **每日摘要（固定时刻）**：每天 **08:30** 跑 `watch.py`（轻量刷新）→ `log_change.py --health` → `log_change.py --digest`。回顾当天已判定变更 + 当前不可用源；今日无变更则摘要静默。
+
+> 摘要默认开启（`targets.json` 的 `digest.enabled` 默认 `true`）；想关掉就把 `enabled` 改成 `false`。
 
 ## 已知陷阱（都是实测出来的，别踩）
 
