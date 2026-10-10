@@ -1,0 +1,13 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Runtime state and logs
+out/
+log/
+state/
+
+# Mac OS
+.DS_Store
