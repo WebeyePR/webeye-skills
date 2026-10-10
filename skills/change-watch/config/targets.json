@@ -1,0 +1,152 @@
+{
+  "_comment": "change-watch 的监控配置。首次运行会复制到工作区（默认 ~/.change-watch/targets.json），此后以工作区那份为准。改这个文件即可增删目标/信源，无需改代码。",
+  "version": 1,
+  "settings": {
+    "stale_after_hours": 168,
+    "_comment_stale": "全局停更阈值（小时）：某源最新条目距今超过它即在报告里标 stale。单个源可用同名字段覆盖；写 null 表示该源不检查停更。",
+    "request_timeout_seconds": 30,
+    "request_retries": 1,
+    "min_changes_to_notify": 1
+  },
+  "notify": {
+    "user_id": "",
+    "chat_id": "REPLACE_WITH_YOUR_GROUP_CHAT_ID",
+    "mention": "all",
+    "_comment": "推送目标：user_id=私信给谁（飞书 openId，空=不发私信）；chat_id=额外发到的群（空/占位符=不发群）。两者都留空则完全不推送（仅落盘 out/notify-unsent-*.md）。交互运行 `python3 scripts/watch.py --init` 会自动按「群名 / 自己」查询飞书 ID 并写入这里，无需手动粘贴；也可手动填。@all 需群主在群设置开启「@所有人」权限，否则把 mention 改成具体 [open_id, ...]。"
+  },
+  "targets": [
+    {
+      "id": "google",
+      "name": "Google 产品与模型",
+      "short_name": "Google",
+      "notes": "官方博客走 RSS（观测流）；模型清单 / 弃用清单走网页表格（对象登记册，用于发现下架与计划下线）。",
+      "streams": [
+        {
+          "id": "blog-google-all",
+          "label": "Google 官方博客 · 全站",
+          "kind": "rss",
+          "url": "https://blog.google/rss/"
+        },
+        {
+          "id": "blog-google-ai",
+          "label": "Google 官方博客 · AI",
+          "kind": "rss",
+          "url": "https://blog.google/technology/ai/rss/"
+        },
+        {
+          "id": "blog-google-gemini",
+          "label": "Google 官方博客 · Gemini",
+          "kind": "rss",
+          "url": "https://blog.google/products/gemini/rss/",
+          "stale_after_hours": 336,
+          "notes": "周更节奏：实测最新条目约 168h，正好压在默认 7 天阈值两侧，会来回跳变，故放宽到 14 天。"
+        },
+        {
+          "id": "blog-google-developers",
+          "label": "Google 官方博客 · 开发者",
+          "kind": "rss",
+          "url": "https://blog.google/technology/developers/rss/"
+        },
+        {
+          "id": "blog-google-cloud",
+          "label": "Google 官方博客 · Google Cloud",
+          "kind": "rss",
+          "url": "https://blog.google/products/google-cloud/rss/"
+        },
+        {
+          "id": "deepmind-blog",
+          "label": "Google DeepMind 博客",
+          "kind": "rss",
+          "url": "https://deepmind.google/blog/rss.xml"
+        },
+        {
+          "id": "research-blog",
+          "label": "Google Research 博客",
+          "kind": "rss",
+          "url": "https://research.google/blog/rss/"
+        },
+        {
+          "id": "opensource-blog",
+          "label": "Google 开源博客",
+          "kind": "rss",
+          "url": "https://opensource.googleblog.com/feeds/posts/default"
+        },
+        {
+          "id": "android-dev-blog",
+          "label": "Android 开发者博客",
+          "kind": "rss",
+          "url": "https://android-developers.googleblog.com/feeds/posts/default",
+          "stale_after_hours": 336,
+          "notes": "周更节奏：实测最新条目约 167h，同样压在边界上，放宽到 14 天以避免误报。"
+        },
+        {
+          "id": "workspace-updates",
+          "label": "Google Workspace 更新",
+          "kind": "rss",
+          "url": "https://workspaceupdates.googleblog.com/feeds/posts/default"
+        },
+        {
+          "id": "chrome-blog",
+          "label": "Chrome 开发者博客",
+          "kind": "rss",
+          "url": "https://developer.chrome.com/blog/feed.xml",
+          "notes": "对照样本：实测停更约 109 天，属信源侧真实静默，保留默认 7 天阈值以持续告警。"
+        },
+        {
+          "id": "gcp-press-corner",
+          "label": "Google Cloud 新闻稿（Press Corner）",
+          "kind": "rss",
+          "url": "https://www.googlecloudpresscorner.com/press-releases?pagetemplate=rss"
+        },
+        {
+          "id": "linkedin-google-cloud",
+          "label": "LinkedIn · Google Cloud 官方页",
+          "kind": "json_ld_posts",
+          "url": "https://www.linkedin.com/showcase/google-cloud/",
+          "timeout_seconds": 60,
+          "notes": "免登录可用：页面内嵌 schema.org JSON-LD（SocialMediaPosting，含全文+ISO时间）。页面加载慢，超时放宽到 60s。被 authwall 拦截时脚本会显式报错，不会误报帖子消失。"
+        },
+        {
+          "id": "x-google",
+          "label": "X @Google（guest 免登录通道）",
+          "kind": "x_timeline",
+          "url": "https://x.com/Google",
+          "timeout_seconds": 30
+        }
+      ],
+      "registries": [
+        {
+          "id": "gemini-api-models",
+          "label": "Gemini API 模型清单",
+          "kind": "html_tables",
+          "url": "https://ai.google.dev/gemini-api/docs/models",
+          "key_column": 0,
+          "notes": "该域对普通 User-Agent 返回 302 循环，脚本已内置浏览器头 + Cookie，勿改。"
+        },
+        {
+          "id": "gemini-api-deprecations",
+          "label": "Gemini API 弃用/下线清单",
+          "kind": "html_tables",
+          "url": "https://ai.google.dev/gemini-api/docs/deprecations",
+          "key_column": 0,
+          "notes": "下架/废弃的主来源。"
+        },
+        {
+          "id": "vertex-model-versions",
+          "label": "Vertex AI 模型版本与生命周期",
+          "kind": "html_tables",
+          "url": "https://cloud.google.com/vertex-ai/generative-ai/docs/learn/model-versions",
+          "key_column": 0,
+          "notes": "列为 Model ID / Release date / Retirement date / Replacement model ID —— Retirement date 可提前预警下架。"
+        },
+        {
+          "id": "vertex-deprecations",
+          "label": "Vertex AI 弃用清单",
+          "kind": "html_tables",
+          "url": "https://cloud.google.com/vertex-ai/generative-ai/docs/deprecations",
+          "key_column": 0
+        }
+      ]
+    }
+  ]
+}
