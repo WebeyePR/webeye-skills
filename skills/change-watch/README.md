@@ -77,15 +77,19 @@ python3 scripts/query.py --object gemini --stats
 1) 运行 `python3 <技能目录>/scripts/watch.py`（退出码 1=配置错，2=有源失败，都继续）。
 2) 读 <工作区>/out/latest.json 的 summary：
    - total==0 且无失败/停更 → 结束（不打扰）。
-   - total==0 但有异常 → `python3 <技能目录>/scripts/log_change.py --status-card` 后按 notify-card.md 发状态卡（私信+失败源群@）。
+   - total==0 但有异常 → `python3 <技能目录>/scripts/log_change.py --status-card` 后**发本人私信**（有失败源会额外产出群卡，一并发群 @）。
    - total>0 → 下一步。
 3) 按 references/criteria.md 对 changes 每条判断，原样带回 change_id，写 judged.json。
 4) `python3 <技能目录>/scripts/log_change.py --input judged.json`（漏判会报错）。
-5) 按 references/notify-card.md 发 out/card-*.json（私信+高优群@）。
+5) 按接收方路由发卡片（脚本已产好，直接发，不要手拼）：
+   - 实时变更卡 `out/card-<目标>-<stamp>.json` → **本人私信**；
+   - 高优群卡 `out/card-<目标>-<stamp>-group.json`（仅 high 时出现）→ **群 @**。
 工作区默认 ~/.change-watch/。不要手拼卡片。
 ```
 
 > 占位符：`<技能目录>` 换成技能解压路径，`<工作区>` 默认 `~/.change-watch/`。
+
+> **按接收方路由（推荐）**：脚本只产卡、不发送，发给谁完全由你的提示词决定。常见分化——实时变更卡发**本人私信**、高优群卡发**群 @**；另建一个固定时刻任务跑 `log_change.py --digest`，把产出的 `out/card-digest-<stamp>.json` 发**群**、健康卡发**本人私信**。这样本人只收「变了」的实时提醒，群收每日定时汇总。
 
 ### 方案 B：纯命令行兜底（只抓取，适合服务器 / 无 AI 环境）
 
@@ -125,6 +129,7 @@ python3 scripts/query.py --object gemini --stats
 - **【优化】摘要卡信息密度 + 序号**：原摘要直接复用变更卡大块 + 长摘要，密度低、记录间间距过大。改为**统计块 + 紧凑编号列表（1./2./3.…） + 失败源脚注**，记录间间距由 ~28px 收紧到 5px 内边距 + 3px 间隔，去掉「来源 N 个 ·」啰嗦前缀。
 
 > 稳定性加固（同版内）：`source_pairs()` 在记录同时缺 `sources` 与 `url`（旧版/脏落盘）时不再 `KeyError` 崩溃，退化为空列表。
+- **【文档】应用示例（自动化 prompt 模板）补全「按接收方路由」**：实时变更卡 `card-<目标>-<stamp>.json` → 本人私信；高优群卡 `card-<目标>-<stamp>-group.json` → 群 @；每日摘要卡 `card-digest-<stamp>.json` → 群；健康卡 `card-health-<stamp>.json` → 本人私信。明确「脚本只产卡、发给谁由提示词决定」，便于他人装完即按此分化。
 
 ### v20261010 · 2026-10-10
 当日首版，从 AIHOT 框架移植的变更监控能力（对象登记册 + 指纹差分 + 待判队列 + 证据溯源 + 健康三态），详见 [`research/`](../../.workbuddy/research/)（如 `2026-10-10-aihot-capability-audit.md`）。
