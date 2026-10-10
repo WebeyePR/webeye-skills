@@ -22,6 +22,7 @@
 | [**wechat-daily-monitor** (微信公众号监控)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/wechat-daily-monitor) | ✅ 生产可用 | 中 | 高 | 基于公众号名称列表的每日发文监控与历史文章获取，生成每日摘要简报。 |
 | [**crm-followup-writer** (业务一部CRM跟进自动同步)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/crm-followup-writer) | ✅ 生产可用 | 中 | 高 | 将口述或粘贴的客户跟进进展，自动解析并写入业务一部共享 CRM 客户跟进记录表。 |
 | [**webeye-kb-organizer** (WebEye 知识库文档整理器)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/webeye-kb-organizer) | ✅ 生产可用 | 低 | 高 | 自动将零散文档/飞书链接/纪要整理为标准格式，并一键归类入库到部门飞书「WebEye 云服务知识库」对应目录。 |
+| [**change-watch** (变更雷达)](https://github.com/WebeyePR/webeye-skills/tree/main/skills/change-watch) | ✅ 生产可用 | 中 | 高 | 监控指定目标（公司/产品线/模型）的变更并沉淀为可查询的变更流水。 |
 
 ## 外部常用技能 (第三方)
 

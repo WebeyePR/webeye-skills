@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Webeye CSBU AI Skills 全局技能元数据注册表",
-  "generated_at": "2026-08-18 12:08:00",
-  "total_skills": 14,
+  "generated_at": "2026-10-10 14:40:29",
+  "total_skills": 15,
   "skills": [
     {
       "name": "agent-proxy-communication",
@@ -75,6 +75,38 @@
       "total_files": 2,
       "total_lines": 87,
       "2. 执行脚本查询 Redis": "scripts/check_redis.sh <contract_id1> [contract_id2] ..."
+    },
+    {
+      "name": "change-watch",
+      "path": "skills/change-watch",
+      "has_skill_md": true,
+      "title": "change-watch（变更雷达）",
+      "description": "监控指定目标（公司/产品线/模型）的变更并沉淀为可查询的变更流水。适用于：想知道某公司最近发布了什么/下架了什么/改了什么价；要给某个产品线做持续变更监控并定时通知；要按时间线、类型、对象查看与检索历史变更并溯源到原文；需要\"先分析判断再通知\"，而不是把原文直接转发。触发场景举例：\"Google 最近有什么更新\"、\"盯着 Gemini 的模型上下架\"、\"这类变更定时推给我\"、\"上次那个模型的变更记录在哪\"。",
+      "version": "v20261010",
+      "author": "Webeye CSBU Team",
+      "license": "MIT",
+      "alwaysActive": false,
+      "status": "生产可用",
+      "complexity": "中",
+      "reusability": "高",
+      "category": "未分类",
+      "scripts": [
+        "scripts/query.py",
+        "scripts/log_change.py",
+        "scripts/watch.py"
+      ],
+      "references": [
+        "references/notify-card.md",
+        "references/criteria.md"
+      ],
+      "tests": [],
+      "has_env_example": false,
+      "has_requirements": false,
+      "has_package_json": false,
+      "total_files": 8,
+      "total_lines": 3218,
+      "description_en": "Monitor changes of a target (company / product line / model) and accumulate them into a queryable change ledger. Use when you want to know what a company recently released / discontinued / repriced; run continuous change monitoring for a product line with scheduled notifications; retrieve and trace historical changes by timeline, type, or object back to the source; and \"analyze-then-notify\" rather than forwarding raw text. Trigger examples: \"What's new from Google\", \"Watch Gemini's model additions/removals\", \"Push these changes to me on a schedule\", \"Where's the change record for that model\".",
+      "agent_created": true
     },
     {
       "name": "content-broadcast",
