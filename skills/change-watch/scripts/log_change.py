@@ -711,11 +711,9 @@ def _changes_since(ws, start_dt):
 def build_digest_card(ws, records, run_at, window_label):
     """每日变更摘要卡：聚合窗口内全部已判定变更，按严重度/目标/类型统计，附当前不可用源。
 
-    records：窗口内变更（dict 列表，已含 significance/target/type）。空列表返回 None，
-    调用方据此静默。
+    records：窗口内变更（dict 列表，已含 significance/target/type）。为空时仍返回一张
+    「本时段无变更」摘要卡（每天定时汇总，间隔够长，有无结果都要正常通知，不作为心跳）。
     """
-    if not records:
-        return None
     recs = sorted(records, key=lambda r: SIG_ORDER.get(r.get("significance"), 9))
 
     by_sig, by_target, by_type = {}, {}, {}
@@ -735,8 +733,11 @@ def build_digest_card(ws, records, run_at, window_label):
                             for t, n in by_target.items()) or "无"
     type_line = "、".join("%s %d" % (k, n) for k, n in
                           sorted(by_type.items(), key=lambda kv: -kv[1])) or "无"
-    summary_md = "**本时段变更 %d 条** ［%s］\n按目标：%s\n按类型：%s" % (
-        len(recs), sig_line, target_line, type_line)
+    if recs:
+        summary_md = "**本时段变更 %d 条** ［%s］\n按目标：%s\n按类型：%s" % (
+            len(recs), sig_line, target_line, type_line)
+    else:
+        summary_md = "**本时段变更 0 条**\n今日（截至 %s）暂无已确认的变更。" % run_at
 
     blocks = [{
         "tag": "interactive_container", "width": "fill", "has_border": True,
@@ -744,7 +745,8 @@ def build_digest_card(ws, records, run_at, window_label):
         "padding": "12px 12px 12px 12px", "vertical_spacing": "4px",
         "elements": [{"tag": "markdown", "content": summary_md}],
     }]
-    blocks += _digest_rows(ws, recs)
+    if recs:
+        blocks += _digest_rows(ws, recs)
 
     failed_rows = _failed_source_rows(ws)
     if failed_rows:
@@ -771,7 +773,7 @@ def build_digest_card(ws, records, run_at, window_label):
             "icon": {"tag": "standard_icon", "token": "calendar_clock_outlined", "color": "blue"},
             "text_tag_list": [{"tag": "text_tag",
                                "text": {"tag": "plain_text", "content": "%d 条变更" % len(recs)},
-                               "color": "blue"}],
+                               "color": "blue" if recs else "green"}],
         },
         "body": {"direction": "vertical", "padding": "12px 12px 20px 12px", "elements": blocks},
     }
@@ -780,7 +782,9 @@ def build_digest_card(ws, records, run_at, window_label):
 def _cmd_digest(ws):
     """生成每日变更摘要卡：聚合「自北京今日 00:00 起」已判定的全部变更 + 当前不可用源。
 
-    今日 0 变更 → 完全静默（不产卡片、不发送）。digest.enabled=false 时跳过。
+    每天定时汇总，间隔够长，**有无变更都正常通知**（无变更时为「本时段变更 0 条」卡）。
+    不作为心跳卡——日级间隔本身已是足够长的发声。digest.enabled=false 时跳过。
+    发出目标为群（notify.chat_id），不发私信（与变更卡/健康卡区分渠道）。
     """
     cfg = digest_config(ws)
     if not cfg.get("enabled", True):
@@ -793,21 +797,20 @@ def _cmd_digest(ws):
     recs = _changes_since(ws, start)
     if not include_low:
         recs = [r for r in recs if r.get("significance") != "low"]
-    if not recs:
-        print("今日（%s）无变更，摘要静默。" % window_label)
-        return 0
     card = build_digest_card(ws, recs, beijing_now_str(), window_label)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     card_path = os.path.join(ws, "out", "card-digest-%s.json" % stamp)
     with open(card_path, "w", encoding="utf-8") as fh:
         json.dump(card, fh, ensure_ascii=False, indent=2)
-    print("每日变更摘要卡片：%s" % card_path)
-    uid = notify_config(ws).get("user_id")
-    if uid:
-        print("  lark-cli im +messages-send --as bot --user-id %s "
-              "--msg-type interactive --content - < %s" % (uid, card_path))
+    n = len(recs)
+    print("每日变更摘要卡片（%s）：%s" % ("无变更" if n == 0 else "%d 条变更" % n, card_path))
+    ncfg = notify_config(ws)
+    chat_id = ncfg.get("chat_id")
+    if chat_id:
+        print("  lark-cli im +messages-send --as bot --chat-id %s "
+              "--msg-type interactive --content - < %s" % (chat_id, card_path))
     else:
-        print("  （未配置私信目标 notify.user_id，跳过私信；如需私信请配置）")
+        print("  （未配置群聊目标 notify.chat_id，跳过群发；如需群发请配置）")
     return 0
 
 
@@ -936,6 +939,156 @@ def _cmd_health(ws):
     return 0
 
 
+# ---------- 心跳：频繁巡检的存活确认，但必须节流，否则去噪声失去意义 ----------
+
+HEARTBEAT_STATE = "state/last_heartbeat.json"
+
+
+def heartbeat_config(ws):
+    """读取 targets.json 顶层 heartbeat 块（巡检心跳节流配置）。读不到返回 {}。"""
+    try:
+        with open(os.path.join(ws, "targets.json"), "r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        cfg = {}
+    h = cfg.get("heartbeat") or {}
+    return h if isinstance(h, dict) else {}
+
+
+def _heartbeat_min_h(ws):
+    """心跳最小间隔（小时）。默认 12，配置 heartbeat.min_hours 可覆盖。
+
+    设计约束（用户明确）：频繁检测需要心跳证明存活，但绝不能频繁通知——
+    否则去噪声（只在真变更时打扰）就失去意义。故阈值取 12h 起步、可上调到一天。
+    """
+    try:
+        v = float(heartbeat_config(ws).get("min_hours", 12))
+    except (TypeError, ValueError):
+        v = 12.0
+    return max(1.0, v)
+
+
+def build_heartbeat_card(ws, run_at):
+    """巡检心跳卡：证明监控仍在运行且最近一次扫描正常。
+
+    数据取自 out/latest.json（与状态卡同源）。这是『安静时候的存活确认』，
+    不报变更（变更另有实时卡），只在节流窗口到期时由 --heartbeat 发出。
+    """
+    try:
+        with open(os.path.join(ws, "out", "latest.json"), "r", encoding="utf-8") as fh:
+            latest = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    s = latest.get("summary", {})
+    stale = latest.get("stale_sources", [])
+    by_id = {x.get("source_id"): x for x in latest.get("sources", []) if x.get("source_id")}
+    scanned = _fmt_cn_time(latest.get("run_at")) or run_at
+    ok = s.get("sources_ok", "?")
+    total_src = s.get("sources", "?")
+    failed = s.get("sources_failed", 0)
+    main_md = ("**监控运行中**\n最近一次自动巡检于 %s 完成，扫描 %s 个来源：%s 正常 / %d 停更 / %s 抓取失败。"
+               % (scanned, total_src, ok, len(stale), failed))
+
+    blocks = [{
+        "tag": "interactive_container", "width": "fill", "has_border": True,
+        "border_color": "blue-100", "corner_radius": "8px", "background_style": "blue-50",
+        "padding": "12px 12px 12px 12px", "vertical_spacing": "4px",
+        "elements": [{"tag": "markdown", "content": main_md}],
+    }]
+    anomaly = []
+    if stale:
+        rows = []
+        for x in stale:
+            sid = x.get("source_id")
+            label = str(x.get("label", sid))
+            h = x.get("stale_hours")
+            suf = "（约%d天）" % round(h / 24) if isinstance(h, (int, float)) else ""
+            rows.append("- " + _src_link(by_id, sid, label, suf))
+        anomaly.append("**停更源（%d）**（已成功抓取 · 对方长期未更新）：\n%s"
+                       % (len(stale), "\n".join(rows)))
+    failed_rows = _failed_source_rows(ws)
+    if failed_rows:
+        anomaly.append("**抓取失败（%d）**（本次无法连接该源 · 非停更）：\n%s"
+                       % (len(failed_rows), "\n".join(failed_rows)))
+    if anomaly:
+        blocks.append({
+            "tag": "interactive_container", "width": "fill", "has_border": True,
+            "border_color": "yellow-100", "corner_radius": "8px", "background_style": "yellow-50",
+            "padding": "12px 12px 12px 12px", "vertical_spacing": "8px",
+            "elements": [{"tag": "markdown", "content": a} for a in anomaly],
+        })
+    for i, b in enumerate(blocks):
+        if i != len(blocks) - 1:
+            b["margin"] = "0px 0px 12px 0px"
+
+    head_tags = [{"tag": "text_tag",
+                  "text": {"tag": "plain_text", "content": "心跳"}, "color": "blue"}]
+    if failed:
+        head_tags.append({"tag": "text_tag",
+                          "text": {"tag": "plain_text", "content": "有失败"}, "color": "red"})
+    return {
+        "schema": "2.0",
+        "config": _status_card_config(),
+        "header": {
+            "title": {"tag": "plain_text", "content": "巡检心跳"},
+            "subtitle": {"tag": "plain_text", "content": "%s · 自动巡检" % run_at},
+            "template": "blue" if not failed else "red",
+            "icon": {"tag": "standard_icon", "token": "check_circle_outlined", "color": "blue"},
+            "text_tag_list": head_tags,
+        },
+        "body": {"direction": "vertical", "padding": "12px 12px 20px 12px", "elements": blocks},
+    }
+
+
+def _cmd_heartbeat(ws):
+    """巡检心跳：节流式存活确认。仅当距上次心跳 >= 阈值（默认 12h）时才发，否则静默。
+
+    用法（放进每小时巡检任务的『本轮无变更』分支）：
+      python3 log_change.py --heartbeat --workspace <ws>
+    返回 0；产卡则打印私信发送命令（心跳发给本人，不刷群）。
+    """
+    min_h = _heartbeat_min_h(ws)
+    state_path = os.path.join(ws, HEARTBEAT_STATE)
+    last_iso = None
+    try:
+        with open(state_path, "r", encoding="utf-8") as fh:
+            last_iso = json.load(fh).get("sent_at")
+    except (OSError, ValueError):
+        last_iso = None
+    if last_iso:
+        dt = _parse_time(last_iso)
+        if dt is not None:
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(BEIJING)
+            hours = (datetime.datetime.now(BEIJING) - dt).total_seconds() / 3600.0
+            if hours < min_h:
+                print("心跳未到期（距上次 %.1fh，阈值 %.1fh），静默。" % (hours, min_h))
+                return 0
+    card = build_heartbeat_card(ws, beijing_now_str())
+    if not card:
+        print("无法生成心跳卡：缺少 out/latest.json 或无法读取", file=sys.stderr)
+        return 1
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    card_path = os.path.join(ws, "out", "card-heartbeat-%s.json" % stamp)
+    with open(card_path, "w", encoding="utf-8") as fh:
+        json.dump(card, fh, ensure_ascii=False, indent=2)
+    # 写入上次心跳时间（先落盘再返回，失败也继续——本轮已发，下轮自然节流）
+    try:
+        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        with open(state_path, "w", encoding="utf-8") as fh:
+            json.dump({"sent_at": now_iso()}, fh, ensure_ascii=False, indent=2)
+    except OSError as e:
+        print("写入心跳状态失败：%s" % e, file=sys.stderr)
+    print("巡检心跳卡片：%s" % card_path)
+    uid = notify_config(ws).get("user_id")
+    if uid:
+        print("  lark-cli im +messages-send --as bot --user-id %s "
+              "--msg-type interactive --content - < %s" % (uid, card_path))
+    else:
+        print("  （未配置私信目标 notify.user_id，跳过私信；如需私信请配置）")
+    return 0
+
+
 def now_iso():
     return datetime.datetime.now(BEIJING).isoformat(timespec="seconds")
 
@@ -995,9 +1148,11 @@ def main():
                    help="生成扫描状态简报卡片（无变更/有异常时知会；读取最近一次 out/latest.json）")
     ap.add_argument("--show", action="store_true", help="打印最近 20 条")
     ap.add_argument("--digest", action="store_true",
-                   help="生成每日变更摘要卡片（聚合窗口内变更 + 当前不可用源；今日无变更则静默）")
+                   help="生成每日变更摘要卡片（聚合窗口内变更 + 当前不可用源；有无变更都发，不作心跳）")
     ap.add_argument("--health", action="store_true",
                    help="对源健康跃迁（不可用/已恢复）发一次性告警；持续失联静音")
+    ap.add_argument("--heartbeat", action="store_true",
+                   help="巡检心跳（节流存活确认）：距上次 >= 阈值(默认12h)才发，否则静默；发给本人私信")
     args = ap.parse_args()
 
     ws = os.path.abspath(os.path.expanduser(args.workspace))
@@ -1062,6 +1217,9 @@ def main():
 
     if args.health:
         return _cmd_health(ws)
+
+    if args.heartbeat:
+        return _cmd_heartbeat(ws)
 
     if not args.input:
         print("需要 --input 或 --show", file=sys.stderr)
