@@ -68,6 +68,14 @@ def now_iso():
     return datetime.datetime.now(BEIJING).isoformat(timespec="seconds")
 
 
+def parse_iso(s):
+    """解析 now_iso() 产出的时间戳；脏数据/缺字段时回退当前时刻，避免崩溃或时钟漂移。"""
+    try:
+        return datetime.datetime.fromisoformat(s)
+    except (TypeError, ValueError):
+        return datetime.datetime.now(BEIJING)
+
+
 def fetch(url, timeout=30, retries=1):
     last = None
     for attempt in range(retries + 1):
@@ -309,17 +317,43 @@ X_USER_TWEETS_URL = "https://api.x.com/graphql/N2tFDY-MlrLxXJ9F_ZxJGA/UserTweets
 
 _X_GUEST = {"token": None}
 
+# guest 通道是免登录的公共接口，抖动是常态，不是我方错误。实测证据：
+# 冷启动首连握手要 15~16 秒（原写死 20s 超时，余量只剩 4 秒），已真实出现过一次
+# 「SSL 握手超时」把整个源判成失败、进而触发一次源健康告警。
+# 所以这里单独放宽超时 + 退避重试，让偶发抖动自愈，而不是骚扰人。
+X_GUEST_TIMEOUT = 30
+X_RETRIES = 2          # 除首次外再试 2 次
+X_RETRY_BASE_SLEEP = 1.5
 
-def x_guest_token():
+# 只有这些算"值得重试的抖动"：限流、服务端错误、连接/读超时。
+# 其余（比如 404 = queryId 轮换失效）重试也没用，直接抛出去让人看到。
+def _x_retryable(exc):
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code == 429 or 500 <= exc.code < 600
+    return isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError, OSError))
+
+
+def x_guest_token(timeout=X_GUEST_TIMEOUT):
     """激活一个 guest token（一次运行内复用）。免登录，但受 X 的游客限流约束。"""
-    if _X_GUEST["token"] is None:
-        req = urllib.request.Request(
-            "https://api.x.com/1.1/guest/activate.json",
-            data=b"", method="POST",
-            headers={"Authorization": "Bearer " + X_BEARER, "User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=20) as r:
-            _X_GUEST["token"] = json.loads(r.read().decode("utf-8"))["guest_token"]
-    return _X_GUEST["token"]
+    if _X_GUEST["token"] is not None:
+        return _X_GUEST["token"]
+    last = None
+    for attempt in range(X_RETRIES + 1):
+        try:
+            req = urllib.request.Request(
+                "https://api.x.com/1.1/guest/activate.json",
+                data=b"", method="POST",
+                headers={"Authorization": "Bearer " + X_BEARER, "User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                _X_GUEST["token"] = json.loads(r.read().decode("utf-8"))["guest_token"]
+            return _X_GUEST["token"]
+        except Exception as exc:  # noqa: BLE001 - 逐个记录，最后一次抛给调用方
+            last = exc
+            if attempt < X_RETRIES and _x_retryable(exc):
+                time.sleep(X_RETRY_BASE_SLEEP * (attempt + 1))
+                continue
+            break
+    raise last
 
 
 def x_gql(endpoint, timeout, **var_over):
@@ -332,19 +366,40 @@ def x_gql(endpoint, timeout, **var_over):
         u.scheme, u.netloc, u.path,
         urllib.parse.urlencode({"variables": json.dumps(variables, separators=(",", ":")),
                                 "features": q.get("features", "{}")}), ""))
-    req = urllib.request.Request(url, headers={
-        "Authorization": "Bearer " + X_BEARER,
-        "User-Agent": UA,
-        "x-guest-token": x_guest_token(),
-        "x-twitter-active-user": "yes",
-        "x-twitter-client-language": "en",
-        "Accept": "*/*",
-    })
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.loads(r.read().decode("utf-8"))
-    if isinstance(data, dict) and data.get("errors"):
-        raise ValueError("X GraphQL 返回错误: %s" % data["errors"][0].get("message", data["errors"]))
-    return data
+    last = None
+    for attempt in range(X_RETRIES + 1):
+        try:
+            req = urllib.request.Request(url, headers={
+                "Authorization": "Bearer " + X_BEARER,
+                "User-Agent": UA,
+                "x-guest-token": x_guest_token(),
+                "x-twitter-active-user": "yes",
+                "x-twitter-client-language": "en",
+                "Accept": "*/*",
+            })
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            if isinstance(data, dict) and data.get("errors"):
+                raise ValueError("X GraphQL 返回错误: %s" % data["errors"][0].get("message", data["errors"]))
+            return data
+        except urllib.error.HTTPError as exc:
+            last = exc
+            # 401/403 多半是 guest token 被回收：作废重取一个再试，而不是整源判死。
+            if exc.code in (401, 403) and attempt < X_RETRIES:
+                _X_GUEST["token"] = None
+                time.sleep(X_RETRY_BASE_SLEEP * (attempt + 1))
+                continue
+            if _x_retryable(exc) and attempt < X_RETRIES:
+                time.sleep(X_RETRY_BASE_SLEEP * (attempt + 1))
+                continue
+            raise
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if _x_retryable(exc) and attempt < X_RETRIES:
+                time.sleep(X_RETRY_BASE_SLEEP * (attempt + 1))
+                continue
+            raise
+    raise last
 
 
 def parse_x_timeline(data, screen_name, skip_retweets=True):
@@ -523,7 +578,10 @@ ALLOWED_SETTINGS = {"stale_after_hours", "request_timeout_seconds",
                     "request_retries", "min_changes_to_notify"}
 ALLOWED_TARGET = {"id", "name", "short_name", "notes", "streams", "registries"}
 ALLOWED_SOURCE_COMMON = {"id", "label", "kind", "url", "notes",
-                         "timeout_seconds", "stale_after_hours"}
+                         "timeout_seconds", "stale_after_hours",
+                         # windowed: 该源只暴露"最近 N 条"窗口（X 时间线、LinkedIn 展示页等）。
+                         # 开了它，从窗口底部掉出去的旧条目会被识别为滚动而非"内容消失"。
+                         "windowed"}
 ALLOWED_SOURCE_BY_KIND = {
     "rss": set(),
     "html_tables": {"key_column", "drop_header_like"},
@@ -589,8 +647,10 @@ def change_id(target, layer, source_id, kind, key):
     return sha1("|".join([str(target), layer, str(source_id), kind, str(key)]))[:12]
 
 
-# 一条变更最多被重新问几次还没判断，就认定"判断超时"并单独留痕（不允许悄悄消失）。
-MAX_REPLAY = 3
+# 未判变更按"年龄"过期，而不是按 watch 运行次数 —— 这样采集频率（cron 可高频）
+# 与判断频率（AI 可低频）彻底解耦：采集每 15min 也不会把还没判的变更提前吃掉。
+# 设为 24h：即便判断任务偶发滞后也留足重判窗口。超时仍单独留痕，不允许悄悄消失。
+MAX_PENDING_AGE_H = 24
 
 
 # ---------- 主流程 ----------
@@ -691,6 +751,36 @@ def effectively_same(old, new):
     if old.get("hash") == new.get("hash"):
         return True
     return same_barring_loss(old.get("text"), new.get("text"))
+
+
+def fell_off_bottom(rec, curr_items):
+    """消失的条目是否早于当前窗口里最旧的条目 —— 也就是从窗口底部掉出去的。
+
+    比不出时间（缺 published / 格式不可解析）一律返回 False：
+    分不清就按"真的消失了"处理，宁可多报一条，也不能把真下架当成滚动吃掉。
+    """
+    gone = hours_since(rec.get("published"))
+    if gone is None:
+        return False
+    ages = [a for a in (hours_since(v.get("published")) for v in curr_items.values())
+            if a is not None]
+    return bool(ages) and gone > max(ages)
+
+
+def split_rolled_out(spec, added, removed, curr_items):
+    """从 removed 里分出「窗口滚动」的部分，返回 (真消失, 滚动)。
+
+    只有三个条件同时成立才判为滚动，缺一个就当真消失：
+      1) 源显式声明 windowed —— 不做默认猜测，避免误伤普通 feed；
+      2) 本轮确实有新条目进来 —— 窗口只会在有新内容时被往前推；
+      3) 消失条目早于当前最旧条目 —— 说明是从底部掉出去，不是被删。
+    """
+    if not spec.get("windowed") or not added or not removed:
+        return removed, []
+    rolled, kept = [], []
+    for item in removed:
+        (rolled if fell_off_bottom(item[1], curr_items) else kept).append(item)
+    return kept, rolled
 
 
 def diff_map(prev, curr):
@@ -1190,6 +1280,14 @@ def main():
 
     health = load_health(ws)
     changes = []
+    # 有限窗口流（X 时间线、LinkedIn 展示页）里从窗口底部滚出去的条目。
+    # 它们不是变更，不进 changes、不占 AI 判断配额，但会单独落账备查。
+    rollouts = []
+    # 各源基线「延迟提交」：先把变更落盘（latest.json / pending.json），最后才推进基线。
+    # 原来是在循环里立刻写状态，而 latest.json 要到最后才写——中途被杀（休眠、重启、
+    # 超时）会把已检出的变更静默吞掉：它们进了基线却没进变更集，下轮不会再出现。
+    # 延迟提交后失败模式变为「下轮重检」，重检由 log_change.py 的 dedupe_key 去重，无害。
+    pending_state_writes = []
     statuses = []
     failed = 0
 
@@ -1227,8 +1325,20 @@ def main():
                                           "%s.json" % st["source_id"])
                 prev = jload(state_path, {}).get("items", {})
                 added, removed, changed = diff_map(prev, items)
+                removed, rolled_out = split_rolled_out(spec, added, removed, items)
 
                 if not args.baseline:
+                    # 滚出窗口的不是"变更"，但要留痕 —— 沉默必须有据，不能悄悄丢。
+                    for key, rec, old in rolled_out:
+                        rollouts.append({
+                            "target": tid, "layer": layer,
+                            "source_id": st["source_id"], "source_label": st["label"],
+                            "key": key, "url": rec.get("link") or st["url"],
+                            "title": rec.get("title") or rec.get("cells", [""])[0],
+                            "published": rec.get("published"),
+                            "reason": "窗口滚动：已从该源的最近条目窗口底部移出",
+                            "logged_at": now_iso(),
+                        })
                     for kind, group in (("added", added), ("removed", removed), ("changed", changed)):
                         for key, rec, old in group:
                             changes.append({
@@ -1249,23 +1359,25 @@ def main():
                             })
 
                 if not args.dry_run:
-                    jdump(state_path, {
+                    # 不立刻落盘：先攒着，等变更安全写入 latest.json / pending.json 后再统一提交。
+                    pending_state_writes.append((state_path, {
                         "source_id": st["source_id"],
                         "label": st["label"],
                         "kind": st["kind"],
                         "url": st["url"],
                         "updated_at": now_iso(),
                         "items": items,
-                    })
+                    }))
 
-                print("  [%s] %-18s 条目=%-4d 新增=%-3d 消失=%-3d 变化=%-3d%s" % (
+                print("  [%s] %-18s 条目=%-4d 新增=%-3d 消失=%-3d 变化=%-3d%s%s" % (
                     "ok" if st["ok"] else "!!", st["source_id"], len(items),
                     len(added), len(removed), len(changed),
-                    "  <STALE>" if st["stale"] else ""))
+                    "  <STALE>" if st["stale"] else "",
+                    "  滚出=%-3d" % len(rolled_out) if rolled_out else ""))
 
     # ---- 待判队列：上一轮没判断完的变更不会被丢掉 ----
     # watch 一跑完状态就推进了，未判的变更下轮不会再出现在 diff 里 —— 等于永久丢失。
-    # 所以未判的进 pending，下轮重新带回来再问一次（有上限，见 MAX_REPLAY）。
+    # 所以未判的进 pending，下轮重新带回来再问一次（上限见 MAX_PENDING_AGE_H）。
     pending_path = os.path.join(ws, "state", "pending.json")
     replayed, expired = [], []
     if not args.baseline:
@@ -1275,9 +1387,15 @@ def main():
                 continue
             if item["change_id"] in curr_ids:
                 continue                      # 本轮又出现了，用新的那份
+            # 按"未判年龄"过期：只看 first_seen 距今多久，与采集跑了多少轮无关。
+            fs = item.get("first_seen")
+            if not fs:                        # 脏记录缺时间戳：从现在起算，既不死循环也不立刻丢
+                fs = now_iso()
+                item = dict(item, first_seen=fs)
             n = int(item.get("reopen_count", 0)) + 1
             item = dict(item, reopen_count=n, reopened=True)
-            (expired if n > MAX_REPLAY else replayed).append(item)
+            age_h = (datetime.datetime.now(BEIJING) - parse_iso(fs)).total_seconds() / 3600.0
+            (expired if age_h > MAX_PENDING_AGE_H else replayed).append(item)
         changes.extend(replayed)
 
     run_at = now_iso()
@@ -1285,8 +1403,12 @@ def main():
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     down = [s["source_id"] for s in statuses if s.get("health_state") == "down"]
     flapping = [s["source_id"] for s in statuses if s.get("health_state") == "flapping"]
-    recovered = [s["source_id"] for s in statuses
-                 if str(s.get("health_transition", "")).endswith("→ ok")]
+    # 只有从「持续失联 down」恢复才算真恢复；flapping → ok 是单次抖动自愈，
+    # 与告警卡（log_change.py --health）同一口径，避免 stdout 与卡片说法不一致。
+    def _real_recovery(s):
+        p = str(s.get("health_transition", "")).split()
+        return len(p) >= 3 and p[0] == "down" and p[-1] == "ok"
+    recovered = [s["source_id"] for s in statuses if _real_recovery(s)]
     # 防御性守卫：停更只可能发生在「成功抓取」的源上。抓取失败的源即便残留 stale
     # 标志也绝不算停更（否则会把"我们抓不到"误报成"对方停更"）。watch.py:1215 的
     # continue 已保证失败源不带 stale，这里再加一层显式过滤，防止日后重构误判。
@@ -1336,8 +1458,17 @@ def main():
                     for item in expired:
                         row = dict(item)
                         row["logged_at"] = run_at
-                        row["reason"] = "判断超时：连续 %d 轮未给出判断" % (MAX_REPLAY + 1)
+                        row["reason"] = "判断超时：未判超过 %d 小时" % MAX_PENDING_AGE_H
                         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if rollouts:
+            # 滚出窗口的条目不进变更集，但必须留痕：将来有人问"这条是不是被我们弄丢了"，
+            # 这里要能查到它是怎么走的，而不是无声无息。
+            with open(os.path.join(ws, "log", "rolled_out.jsonl"), "a", encoding="utf-8") as fh:
+                for row in rollouts:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        # 变更已安全落盘，现在才推进各源基线（基线运行同样需要，故放在 baseline 判断之外）。
+        for spath, sobj in pending_state_writes:
+            jdump(spath, sobj)
         if not args.baseline:
             with open(os.path.join(ws, "log", "runs.jsonl"), "a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"run_at": run_at, "summary": payload["summary"]},
@@ -1359,9 +1490,12 @@ def main():
         print("重新带回未判变更 %d 条（上一轮没给判断，本轮再问一次）：%s"
               % (len(replayed), ", ".join(x["change_id"] for x in replayed)))
     if expired:
-        print("判断超时 %d 条（连续 %d 轮未判，已记入 log/unjudged.jsonl，不再重问）：%s"
-              % (len(expired), MAX_REPLAY + 1,
+        print("判断超时 %d 条（未判超过 %d 小时，已记入 log/unjudged.jsonl，不再重问）：%s"
+              % (len(expired), MAX_PENDING_AGE_H,
                  ", ".join(x["change_id"] for x in expired)))
+    if rollouts:
+        print("窗口滚动 %d 条（旧条目移出该源的可见窗口，非内容消失，已记入 log/rolled_out.jsonl）：%s"
+              % (len(rollouts), ", ".join(r["source_id"] for r in rollouts)))
     if args.baseline:
         print("本次是基线运行：状态已建立，未产出变更。下次运行起只报增量。")
     elif s["total"]:

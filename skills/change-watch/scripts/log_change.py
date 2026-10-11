@@ -632,6 +632,11 @@ def build_status_card(ws, run_at):
                              for x in stale) or "无"
     stats = "扫描 %s 个来源 · 抓取失败 %s · 停更 %d（%s）" % (
         s.get("sources", "?"), s.get("sources_failed", "?"), len(stale), stale_links)
+    # 状态卡是"安静时候"唯一的发声渠道，读者必须能看出这份简报有多新鲜 ——
+    # 否则采集真停了、latest.json 冻在几天前，卡片上看起来也一切正常。
+    scanned = _fmt_cn_time(latest.get("run_at"))
+    if scanned:
+        stats = "%s · 数据采集于 %s" % (stats, scanned)
     blocks.append({"tag": "markdown",
                    "content": "<font color='grey'>%s</font>" % stats, "text_size": "notation"})
 
@@ -879,15 +884,22 @@ def _cmd_health(ws):
         # 跃迁串形如 "ok → down" / "flapping → ok"（watch.py 用空格包裹箭头）。
         # 只关心「新状态」（串尾那个词）：down=不可用，ok=已恢复，其余（flapping 等）静音。
         # 不按箭头字符精确匹配——箭头写法变动也不影响判断。
-        new_state = trans.split()[-1] if trans.split() else ""
+        parts = trans.split()
+        new_state = parts[-1] if parts else ""
+        old_state = parts[0] if len(parts) >= 3 else ""
         if new_state == "down":
             if alerted.get(sid) != trans:
                 alerts.append((str(s.get("label", sid)), "down", s.get("failing_hours"), trans))
                 alerted[sid] = trans
         elif new_state == "ok":
-            if alerted.get(sid) != trans:
-                alerts.append((str(s.get("label", sid)), "ok", None, trans))
-                alerted[sid] = trans
+            # 只有从「持续失联 down」恢复才通知。flapping → ok 是单次网络抖动自愈，
+            # 不值得发卡 —— 实测各源偶发失败率约 2.5%/轮，18 个源下这会频繁刷"已恢复"。
+            if old_state == "down":
+                if alerted.get(sid) != trans:
+                    alerts.append((str(s.get("label", sid)), "ok", None, trans))
+                    alerted[sid] = trans
+            else:
+                alerted.pop(sid, None)
         else:
             # flapping 等中间态不告警；清掉旧记录，未来再发生能重新告警
             alerted.pop(sid, None)
@@ -1078,7 +1090,7 @@ def main():
             continue
         batch_ids |= judged_ids(rec)
         # 「判为不是真变更」必须显式写出来，不能靠"我不写它"来表达：
-        # 什么都不写 = 漏判，会被反复重问 3 轮再记进 unjudged.jsonl，纯噪音。
+        # 什么都不写 = 漏判，会被反复带回重问，超过 24 小时未判才记进 unjudged.jsonl，纯噪音。
         if rec.get("discard"):
             row = {"change_id": str(rec.get("change_id", "")).strip(),
                    "title": rec.get("title") or rec.get("change_id"),
@@ -1167,8 +1179,8 @@ def main():
     if missing:
         print("\n⚠ 本轮有 %d 条变更没给判断：%s" % (len(missing), ", ".join(missing)),
               file=sys.stderr)
-        print("  它们留在待判队列里，下轮 watch 会再问一次（最多 3 轮，"
-              "之后记入 log/unjudged.jsonl）。", file=sys.stderr)
+        print("  它们留在待判队列里，下轮 watch 会再问一次（按未判年龄过期，默认 24 小时，"
+              "与采集频次无关；超时才记入 log/unjudged.jsonl）。", file=sys.stderr)
 
     to_notify = [r for r in appended if r.get("notify") and not args.no_notify]
     if to_notify:

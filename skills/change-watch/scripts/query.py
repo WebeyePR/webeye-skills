@@ -10,6 +10,7 @@ change-watch :: 查询沉淀
   query.py --type 模型发布 --since 2026-10-01
   query.py --object gemini --grep 定价
   query.py --stats                        # 各类型 / 各目标 / 各重要性计数
+  query.py --rolled-out                   # 被判为「窗口滚动」、没当变更上报的条目
   query.py --format json                  # 机器可读
 """
 import argparse
@@ -51,6 +52,28 @@ def load_log(ws):
     return rows
 
 
+def load_rolled_out(ws, limit=50):
+    """读取被判为「窗口滚动」的条目。
+
+    它们不是变更，所以不进 changes.jsonl；但必须能查——否则有人发现"这条帖子怎么没报"
+    时会以为是脚本漏了，而实际上是它从源的可见窗口底部滚出去了。沉默必须有据。
+    """
+    path = os.path.join(ws, "log", "rolled_out.jsonl")
+    if not os.path.exists(path):
+        return []
+    rows = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    pass
+    rows.sort(key=lambda r: str(r.get("logged_at", "")), reverse=True)
+    return rows[:limit]
+
+
 def parse_day(text):
     if not text:
         return None
@@ -65,6 +88,8 @@ def main():
     ap.add_argument("--workspace", default=DEFAULT_WS)
     ap.add_argument("--timeline", action="store_true", help="按时间倒序、按天分组输出")
     ap.add_argument("--stats", action="store_true", help="输出计数统计")
+    ap.add_argument("--rolled-out", action="store_true",
+                    help="列出被判为窗口滚动、未当作变更的条目")
     ap.add_argument("--target")
     ap.add_argument("--type")
     ap.add_argument("--object")
@@ -77,6 +102,19 @@ def main():
     args = ap.parse_args()
 
     ws = os.path.abspath(os.path.expanduser(args.workspace))
+
+    if args.rolled_out:
+        ro = load_rolled_out(ws, args.limit)
+        if not ro:
+            print("没有窗口滚动记录。")
+            return 0
+        print("窗口滚动 %d 条（旧条目移出源的可见窗口，非内容消失，故未当作变更）：\n" % len(ro))
+        for r in ro:
+            print("  %s  %-22s %s" % (str(r.get("logged_at", ""))[:16],
+                                      r.get("source_id", "?"), r.get("title", "")))
+            print("      %s" % r.get("reason", ""))
+        return 0
+
     rows = load_log(ws)
 
     since = parse_day(args.since)

@@ -2,7 +2,7 @@
 name: change-watch
 description: 监控指定目标（公司/产品线/模型）的变更并沉淀为可查询的变更流水。适用于：想知道某公司最近发布了什么/下架了什么/改了什么价；要给某个产品线做持续变更监控并定时通知；要按时间线、类型、对象查看与检索历史变更并溯源到原文；需要"先分析判断再通知"，而不是把原文直接转发。触发场景举例："Google 最近有什么更新"、"盯着 Gemini 的模型上下架"、"这类变更定时推给我"、"上次那个模型的变更记录在哪"。
 description_en: Monitor changes of a target (company / product line / model) and accumulate them into a queryable change ledger. Use when you want to know what a company recently released / discontinued / repriced; run continuous change monitoring for a product line with scheduled notifications; retrieve and trace historical changes by timeline, type, or object back to the source; and "analyze-then-notify" rather than forwarding raw text. Trigger examples: "What's new from Google", "Watch Gemini's model additions/removals", "Push these changes to me on a schedule", "Where's the change record for that model".
-version: v20261010.1
+version: v20261011.1
 license: MIT
 agent_created: true
 ---
@@ -65,8 +65,20 @@ python3 <技能目录>/scripts/watch.py --init --non-interactive   # CI / 自动
 | `out/latest.json` | 本轮结果（`summary` / `health` / `stale_sources` / `changes`），**先看这个** |
 | `log/changes.jsonl` | 已判断并落盘的变更流水（检索的对象） |
 | `log/discarded.jsonl` | 判为「不是真变更」的条目（带理由，不进流水但留痕） |
-| `log/unjudged.jsonl` | 连续 3 轮没给出判断、被放弃的变更（**沉默必须有据**，不允许悄悄消失） |
+| `log/unjudged.jsonl` | 未判超过 24 小时、被放弃的变更（**沉默必须有据**，不允许悄悄消失） |
+| `log/rolled_out.jsonl` | 被判为「窗口滚动」的条目（见下），不是变更、不占判断配额，但留痕可查 |
 | `log/runs.jsonl` | 每轮扫描的小结（只有计数） |
+
+#### 有限窗口流：滚动 ≠ 消失
+
+X 时间线、LinkedIn 展示页这类源只暴露「最近 N 条」窗口。新内容进来时，最旧的几条会被挤出窗口——
+它们**不是被删除**，但按朴素差分会报成 `removed`，于是每次滚动都制造一批"下架"假告警要 AI 判。
+
+已声明 `windowed: true` 的源，脚本会把这类条目单独识别出来（三条件同时成立才判为滚动：
+**源声明 windowed** + **本轮确实有新条目进来** + **消失条目早于当前窗口最旧的条目**），
+它们不进变更集、不占判断配额，只追加到 `log/rolled_out.jsonl`。
+任一条件不成立（比如本轮没新增、或消失的是中间条目、或时间比不出来）就**按真消失处理**——
+宁可多报，也不把真下架当成滚动吃掉。用 `query.py --rolled-out` 可查。
 
 **配置写错会直接中止**：`watch.py` 启动时校验字段白名单，不认识的键（比如把 `stale_after_hours`
 拼错）会点名报错并退出 —— 静默忽略会让"看起来在跑、其实没生效"，必须让它失败。
@@ -107,7 +119,7 @@ python3 <技能目录>/scripts/watch.py
 读 `references/criteria.md`，对 `changes` 里**每一条**回答四个问题：是不是真变更、什么类型、多重要、要不要通知。
 
 - **不真的（营销稿、传闻、只发预告、例行小版本）→ 写 `"discard": true` 加一句 `discard_reason`**。
-  别用"我不写它"来表达丢弃：什么都不写 = 漏判，它会被反复重问 3 轮再进 `log/unjudged.jsonl`。
+  别用"我不写它"来表达丢弃：什么都不写 = 漏判，它会被反复带回重问，超过 24 小时未判才进 `log/unjudged.jsonl`。
 - **同一事件多家报道 → 合并成一条**，`sources` 列全，并把被合并掉的 `change_id` 写进
   `merged_change_ids`（否则覆盖度校验会把它们当成漏判）。
 - **判不出来（材料不足）→ 写 `significance: "unknown"`**：落盘但不通知。别硬判。
@@ -117,8 +129,10 @@ python3 <技能目录>/scripts/watch.py
 **每条判断都要原样带回 `change_id`**。这是本技能防"漏判即永久丢失"的关键：
 
 - `watch.py` 一跑完状态就推进了，某条变更**这轮没判，下轮就不会再出现在 diff 里**。
-- 所以未判的会留在 `state/pending.json`，下轮 `watch.py` **重新带回来**再问一次（最多 3 轮）。
-- 3 轮仍没判 → 写进 `log/unjudged.jsonl` 并点名，不再重问。沉默必须有据。
+- 所以未判的会留在 `state/pending.json`，下轮 `watch.py` **重新带回来**再问一次。
+- 过期按**未判年龄**算（默认 24 小时，见 `MAX_PENDING_AGE_H`），**不按采集轮次**——
+  所以采集跑得再频繁（cron/launchd 高频）也不会把未判的变更提前吃掉。
+- 超过 24 小时仍没判 → 写进 `log/unjudged.jsonl` 并点名，不再重问。沉默必须有据。
 - **`log_change.py` 会核对覆盖度，漏一条就点名告诉你缺哪个 `change_id`。**
 
 > **漏答不是"判断为无关"，是失败。** 别用"先记录已判的、剩下的以后再说"糊过去——
@@ -184,6 +198,7 @@ python3 <技能目录>/scripts/query.py --type 模型下架      # 按类型
 python3 <技能目录>/scripts/query.py --object gemini     # 按对象（子串匹配）
 python3 <技能目录>/scripts/query.py --since 2026-10-01 --grep 定价
 python3 <技能目录>/scripts/query.py --stats             # 各类型/目标/重要性计数
+python3 <技能目录>/scripts/query.py --rolled-out        # 被判为窗口滚动、未当作变更的条目
 python3 <技能目录>/scripts/log_change.py --show         # 最近 20 条
 ```
 
@@ -237,11 +252,20 @@ python3 <技能目录>/scripts/log_change.py --show         # 最近 20 条
 ```
 
 > 兜底方案只完成"抓取"段；判断 + 通知仍需 AI 工具读 `out/latest.json` 后跑上面的第 3–5 步。
+>
+> ⚠️ **两点提醒**：① 用系统调度单独跑采集时，`--health` 也要跟在**每次**采集后跑（跃迁会被下一轮覆盖，见下条），否则健康告警会丢；② 部分环境（如受管沙箱）**装不了** `cron` / `launchd`，此时就用上面的"巡检通道"同轮耦合方案，效果等价且延迟更低。
 
 **推荐的自动化组合**（宿主工具按此建两条定时任务即可）：
 
-- **实时通道（间隔巡检）**：每 10 小时（或 30 分钟）跑一遍上面模板的第 1–5 步——`watch.py` → `--health` → 判断 → `log_change.py --input` → 发送。变更全级别实时发**本人私信**，高优额外发**群 @**；源健康跃迁一次性告警发**本人私信**。
-- **每日摘要（固定时刻）**：每天 **08:30** 跑 `watch.py`（轻量刷新）→ `log_change.py --health` → `log_change.py --digest`。回顾当天已判定变更 + 当前不可用源；今日无变更则摘要静默。**按接收方分流：健康卡发本人私信，摘要卡发群**（群是定时汇总的接收方；本人只收实时变更卡与健康告警，不在群重复收摘要）。
+- **巡检通道（间隔触发，建议每小时）**：跑一遍上面模板的第 1–5 步——`watch.py` → `--health` → 空跑网关 → 判断 → `log_change.py --input` → 发送。变更全级别实时发**本人私信**，高优额外发**群 @**；源健康跃迁一次性告警发**本人私信**。
+- **每日摘要（固定时刻）**：每天 **08:30** 只跑 `log_change.py --digest`（**不要再跑 `watch.py`**，采集已由巡检通道完成）。回顾当天已判定变更 + 当前不可用源；今日无变更则摘要静默。**按接收方分流：健康卡发本人私信，摘要卡发群**（群是定时汇总的接收方；本人只收实时变更卡与健康告警，不在群重复收摘要）。
+
+> **调度粒度与延迟（实测）**：多数宿主定时任务的最细粒度是**每小时**（`FREQ=HOURLY;INTERVAL=1`；`MINUTELY` 普遍不支持，`BYMINUTE` 在 HOURLY 下会被忽略）。
+> 由于采集与判断在**同一轮**内完成，端到端延迟 = 轮次间隔 + 采集耗时 ≈ **典型 30 分钟、最差 1 小时**。
+> 注意：**通知延迟由 AI 轮次频率决定，与采集频率无关**——把采集单独高频化（cron）并不能让通知更快，反而因「采集间隔 + 判断间隔」叠加而更慢。
+> 因此**采集与判断绑在同一轮是更优解**，不是妥协。
+
+> **`--health` 必须紧跟采集、每轮都跑**：源健康跃迁只在状态变化**那一轮**的 `latest.json` 里出现，下一轮即被覆盖。若只在每天固定时刻跑 `--health`，两次之间的跃迁会**永久丢失**。
 
 > 摘要默认开启（`targets.json` 的 `digest.enabled` 默认 `true`）；想关掉就把 `enabled` 改成 `false`。
 
@@ -253,10 +277,12 @@ python3 <技能目录>/scripts/log_change.py --show         # 最近 20 条
 4. **`blog.google` 系列是唯一自我一致的时间基准**：RSS 时间戳 == 页面自报时间、带明确 `+00:00`。要判定"哪个更新"，以它为准。
 5. **清单页会改版**：`html_tables` 依赖表格结构。若某 registry 突然报"整表消失"，先怀疑页面改版，再去人工看一眼，别直接当成"全部下架"。
 6. **X（推特）免登录走 `x_timeline`（guest 通道），但有三个已知风险**：① X 对游客有**限流**——guest token 每次运行激活一个、同 token 别狂刷，几十个账号以内没问题，429 会以源失败的形式显式报错；② GraphQL 的 queryId 会**轮换**——失效时表现为全部 X 源报错（源会标 FAIL，不会误判成"推文消失"），届时从开源库 `@the-convocation/twitter-scraper` 提取新端点串，改源配置里的 `user_tweets_url` / `user_by_screen_name_url` 或更新脚本常量即可；③ 该通道是**非官方接口**，X 随时可能收紧，别把它当唯一信源。**不要**在配置里直接写 x.com 的页面 URL 让它当 RSS 抓——页面是 JS 渲染的，抓不到推文。
+   - **guest 通道的抖动由脚本自愈**：实测冷启动首连握手要 15~16 秒（早期写死 20s 超时，余量只剩 4 秒，真实出现过一次 SSL 握手超时把整源判死并触发一次源健康告警）。现在 guest token 激活放宽到 30s，且对 **429 / 5xx / 连接与读超时退避重试 2 次**；401/403 会**作废 token 重取**再试。**404（queryId 失效）与 GraphQL 业务错误不重试**——重试也没用，要立刻让人看到。
 7. **LinkedIn 只能走 `json_ld_posts`**：showcase 页免登录内嵌 JSON-LD（含全文 + ISO 时间 + 帖子 URL）。解析器在拿不到帖子时会**显式报错**（authwall 拦截 / 页面改版）——这是刻意设计：源会标 FAIL 进入失败统计，而不会被误读成"全部帖子消失"。别把它改成"容错返回空"。LinkedIn 页面加载慢，给该源单独配 `timeout_seconds: 60`。
+   - **LinkedIn 的可见集合会抖动**：showcase 页每次返回的 10 条并不严格是"最新 10 条"，实测出现过"较新的帖子消失、较旧的帖子出现"。这种情况下消失条目**早于窗口最旧**这个条件不成立，所以不会被误判成滚动，仍会作为 `removed` 交给 AI 判断——这是刻意的保守。**X 与 LinkedIn 都建议配 `windowed: true`**，能消掉大部分"窗口滚动"型假告警，但消不掉集合抖动型噪声。
 8. **停更阈值要贴着源的节奏，别一律用默认 7 天**：实测 `android-dev-blog`（167.1h）与 `blog-google-gemini`（168.1h）的最新条目正好压在 168 小时两侧，会**每轮来回跳变**，纯属噪音。周更来源单独放宽（配置加 `stale_after_hours: 336`），低频来源显式写 `null` 完全不检查。**加新源时先看它自己的更新节奏再定阈值。**
 9. **`html_tables`（对象登记册）没有"停更"概念**：清单页自带时间戳的很少，脚本对 registry 不算 `stale_hours`，所以 registry 永远不会被标停更——这是已知取舍。别把"registry 没报警"理解成"清单没变化"；清单变化靠**条目差分**发现。
-10. **未判的变更会自己回来，别嫌烦**：`state/pending.json` 里的条目下一轮会重新出现在 `changes` 里（带 `reopened: true`）。这是刻意设计——不这样做，漏判就等于永久丢失。最多重问 3 轮，之后进 `log/unjudged.jsonl`。
+10. **未判的变更会自己回来，别嫌烦**：`state/pending.json` 里的条目下一轮会重新出现在 `changes` 里（带 `reopened: true`）。这是刻意设计——不这样做，漏判就等于永久丢失。会一直带回直到判定，超过 24 小时未判才进 `log/unjudged.jsonl`。
 11. **配置里出现未知字段会直接中止运行**：`watch.py` 用字段白名单校验，拼错的键会被点名。别去"绕过"它，那是防止配置漂移变成"看起来在跑其实没生效"的闸门。
 12. **说明里的版本号/日期/价格会被核对**：`log_change.py` 逐个比对原文，对不上会标 `grounding: unverified` 并在 stderr 点名。看到就回原文改，别放着不管。
 13. **解析不出内容 = 源失败，不是"抓到了 10 条"**：RSS 解析器遇到"标题全空"会显式报错让源标 FAIL（LinkedIn / X 同理）。空条目最危险的地方是看起来抓到了，但差分只认 URL——正文改了发现不了。已实测过一次：`developer.chrome.com` 的 feed 用 CDATA 包裹正文，剥标签时把整段 `<![CDATA[...]]>` 当成一个标签删掉了，10 条条目标题与正文全空却报 ok。某源突然 FAIL 时，先人工看源是不是改版了。
