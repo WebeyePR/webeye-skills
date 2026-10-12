@@ -745,7 +745,7 @@ def build_digest_card(ws, records, run_at, window_label):
         summary_md = "**本时段变更 %d 条** ［%s］\n按目标：%s\n按类型：%s" % (
             len(recs), sig_line, target_line, type_line)
     else:
-        summary_md = "**本时段变更 0 条**\n今日（截至 %s）暂无已确认的变更。" % run_at
+        summary_md = "**本时段变更 0 条**\n截至 %s 暂无已确认的变更。" % run_at
 
     blocks = [{
         "tag": "interactive_container", "width": "fill", "has_border": True,
@@ -841,6 +841,12 @@ def _fmt_cn_short(value):
 
 
 def _cmd_digest(ws):
+    """生成每日变更摘要卡（持 digest 排他锁后转 impl，防并发竞争锚点/pending）。"""
+    with _digest_lock(ws):
+        return _cmd_digest_impl(ws)
+
+
+def _cmd_digest_impl(ws):
     """生成每日变更摘要卡：聚合窗口内已判定的全部变更 + 当前不可用源。
 
     每天定时汇总，间隔够长，**有无变更都正常通知**（无变更时为「本时段变更 0 条」卡）。
@@ -863,7 +869,12 @@ def _cmd_digest(ws):
     if mode not in ("delta", "day"):
         print("digest.mode 取值应为 delta/day，当前 %r；按 delta 处理。" % mode, file=sys.stderr)
         mode = "delta"
-    seed_h = float(cfg.get("seed_hours", 24) or 24)
+    try:
+        seed_h = float(cfg.get("seed_hours", 24))
+    except (TypeError, ValueError):
+        print("digest.seed_hours 取值应为小时数，当前 %r；按 24 处理。" % (cfg.get("seed_hours"),), file=sys.stderr)
+        seed_h = 24.0
+    seed_h = max(0.0, seed_h)
 
     now = datetime.datetime.now(BEIJING)
     run_at = beijing_now_str()
