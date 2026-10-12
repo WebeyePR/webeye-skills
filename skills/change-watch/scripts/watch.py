@@ -573,7 +573,8 @@ def hours_since(iso_text):
 
 # 不认识的键一律报错。理由：静默忽略会让配置漂移变成"看起来在跑、其实没生效"——
 # 例如把 stale_after_hours 拼错，源会一直用默认阈值告警，而日志上完全看不出来。
-ALLOWED_TOP = {"settings", "targets", "version", "notify", "digest"}
+# heartbeat: 巡检心跳节流配置（log_change.py --heartbeat 读取），与 README/config 模板一致。
+ALLOWED_TOP = {"settings", "targets", "version", "notify", "digest", "heartbeat"}
 ALLOWED_SETTINGS = {"stale_after_hours", "request_timeout_seconds",
                     "request_retries", "min_changes_to_notify"}
 ALLOWED_TARGET = {"id", "name", "short_name", "notes", "streams", "registries"}
