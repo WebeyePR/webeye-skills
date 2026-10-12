@@ -2,7 +2,7 @@
 name: change-watch
 description: 监控指定目标（公司/产品线/模型）的变更并沉淀为可查询的变更流水。适用于：想知道某公司最近发布了什么/下架了什么/改了什么价；要给某个产品线做持续变更监控并定时通知；要按时间线、类型、对象查看与检索历史变更并溯源到原文；需要"先分析判断再通知"，而不是把原文直接转发。触发场景举例："Google 最近有什么更新"、"盯着 Gemini 的模型上下架"、"这类变更定时推给我"、"上次那个模型的变更记录在哪"。
 description_en: Monitor changes of a target (company / product line / model) and accumulate them into a queryable change ledger. Use when you want to know what a company recently released / discontinued / repriced; run continuous change monitoring for a product line with scheduled notifications; retrieve and trace historical changes by timeline, type, or object back to the source; and "analyze-then-notify" rather than forwarding raw text. Trigger examples: "What's new from Google", "Watch Gemini's model additions/removals", "Push these changes to me on a schedule", "Where's the change record for that model".
-version: v20261011.2
+version: v20261013
 license: MIT
 agent_created: true
 ---
@@ -258,7 +258,7 @@ python3 <技能目录>/scripts/log_change.py --show         # 最近 20 条
 **推荐的自动化组合**（宿主工具按此建两条定时任务即可）：
 
 - **巡检通道（间隔触发，建议每小时）**：跑一遍上面模板的第 1–5 步——`watch.py` → `--health` → 空跑网关 → 判断 → `log_change.py --input` → 发送。变更全级别实时发**本人私信**，高优额外发**群 @**；源健康跃迁一次性告警发**本人私信**。
-- **每日摘要（固定时刻）**：每天 **08:30** 只跑 `log_change.py --digest`（**不要再跑 `watch.py`**，采集已由巡检通道完成）。回顾当天已判定变更 + 当前不可用源；今日无变更则摘要静默。**按接收方分流：健康卡发本人私信，摘要卡发群**（群是定时汇总的接收方；本人只收实时变更卡与健康告警，不在群重复收摘要）。
+- **每日摘要（固定时刻）**：每天 **08:30** 只跑 `log_change.py --digest`（**不要再跑 `watch.py`**，采集已由巡检通道完成）。**delta 模式**（默认）：聚合「自上次已交付摘要」到本次运行之间新入账的变更 + 当前不可用源；窗口首尾相接、多日间隔自动吸收、不重不漏（消除自然日零点的约 15.5h 盲区）。`--digest` **只产卡 + 写 pending，不推进锚点**；须在摘要卡**发送成功后**再跑 `log_change.py --digest --commit` 推进锚点（宁重勿漏：发送失败不 commit → 下次自动重覆盖重试）。`digest.mode=day` 可回退旧自然日行为。**按接收方分流：健康卡发本人私信，摘要卡发群**（群是定时汇总的接收方；本人只收实时变更卡与健康告警，不在群重复收摘要）。
 
 > **调度粒度与延迟（实测）**：多数宿主定时任务的最细粒度是**每小时**（`FREQ=HOURLY;INTERVAL=1`；`MINUTELY` 普遍不支持，`BYMINUTE` 在 HOURLY 下会被忽略）。
 > 由于采集与判断在**同一轮**内完成，端到端延迟 = 轮次间隔 + 采集耗时 ≈ **典型 30 分钟、最差 1 小时**。

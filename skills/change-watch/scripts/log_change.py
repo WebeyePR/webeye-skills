@@ -29,6 +29,7 @@ sources 可以给字符串（自动按配置映射中文名）或 {"name","url"}
         按"非 0 但不中止"处理。
 """
 import argparse
+import contextlib
 import datetime
 import email.utils
 import hashlib
@@ -36,6 +37,11 @@ import json
 import os
 import re
 import sys
+
+try:
+    import fcntl  # Unix 排他锁；缺失则降级为无锁（仍正确，仅无互斥）
+except ImportError:  # 非 Unix 平台
+    fcntl = None
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_WS = os.path.join(os.path.expanduser("~"), ".change-watch")
@@ -680,8 +686,9 @@ def digest_config(ws):
     return d if isinstance(d, dict) else {}
 
 
-def _changes_since(ws, start_dt):
-    """读取 log/changes.jsonl，返回 logged_at（北京时间）>= start_dt 的变更记录。"""
+def _changes_since(ws, start_dt, inclusive=True):
+    """读取 log/changes.jsonl，返回 logged_at（北京时间）>= start_dt（inclusive=True）
+    或 > start_dt（inclusive=False）的变更记录。digest 增量窗口用 > 以避免边界重复。"""
     out = []
     path = os.path.join(ws, "log", "changes.jsonl")
     if not os.path.exists(path):
@@ -703,7 +710,8 @@ def _changes_since(ws, start_dt):
                 continue
             if dt.tzinfo is not None:
                 dt = dt.astimezone(BEIJING)
-            if dt >= start_dt:
+            hit = dt >= start_dt if inclusive else dt > start_dt
+            if hit:
                 out.append(rec)
     return out
 
@@ -779,39 +787,206 @@ def build_digest_card(ws, records, run_at, window_label):
     }
 
 
+def _atomic_write_json(path, data):
+    """原子写 JSON：先写 .tmp 再 os.replace，避免半写文件被下一轮读到。"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def _read_json_or(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def _digest_state_path(ws):
+    return os.path.join(ws, "state", "digest_checkpoint.json")
+
+
+def _digest_pending_path(ws):
+    return os.path.join(ws, "state", "digest_pending.json")
+
+
+@contextlib.contextmanager
+def _digest_lock(ws):
+    """对 digest 状态加排他锁，防并发（自动化 + 手动）竞争锚点。无 fcntl 则降级为空操作。"""
+    path = os.path.join(ws, "state", "digest.lock")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fh = open(path, "w")
+    try:
+        if fcntl is not None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
+def _fmt_cn_short(value):
+    """把 ISO/时间字符串渲染成『M月D日 HH:MM』（统一北京时间）；解析不出原样返回。"""
+    dt = _parse_time(value) if isinstance(value, str) else value
+    if dt is None:
+        return str(value)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(BEIJING)
+    return "%d月%d日 %02d:%02d" % (dt.month, dt.day, dt.hour, dt.minute)
+
+
 def _cmd_digest(ws):
-    """生成每日变更摘要卡：聚合「自北京今日 00:00 起」已判定的全部变更 + 当前不可用源。
+    """生成每日变更摘要卡：聚合窗口内已判定的全部变更 + 当前不可用源。
 
     每天定时汇总，间隔够长，**有无变更都正常通知**（无变更时为「本时段变更 0 条」卡）。
     不作为心跳卡——日级间隔本身已是足够长的发声。digest.enabled=false 时跳过。
     发出目标为群（notify.chat_id），不发私信（与变更卡/健康卡区分渠道）。
+
+    窗口模式（targets.json: digest.mode）：
+    - "delta"（默认）：锚定「上次已交付摘要」，窗口 = (上次 sent_at, 本次 to]；无锚点则
+      seed = now - seed_hours。**本命令只产卡 + 写 pending，不推进锚点**；须由调用方在
+      发送成功后跑 `--digest --commit` 推进（宁重勿漏：发送失败不推进→下轮自动重覆盖）。
+      对多日间隔免疫：from 取上次锚点、to 取本次运行时刻，窗口自动吸收间隔，首尾相接不重不漏。
+    - "day"（legacy）：锚定自然日零点，窗口 = [今天 00:00, now]（旧行为，可回退）。
     """
     cfg = digest_config(ws)
     if not cfg.get("enabled", True):
         print("摘要已禁用（digest.enabled=false），跳过。")
         return 0
     include_low = bool(cfg.get("include_low", True))
+    mode = str(cfg.get("mode", "delta")).strip().lower()
+    if mode not in ("delta", "day"):
+        print("digest.mode 取值应为 delta/day，当前 %r；按 delta 处理。" % mode, file=sys.stderr)
+        mode = "delta"
+    seed_h = float(cfg.get("seed_hours", 24) or 24)
+
     now = datetime.datetime.now(BEIJING)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    window_label = "北京时间 %d月%d日 00:00 至今" % (start.month, start.day)
-    recs = _changes_since(ws, start)
+    run_at = beijing_now_str()
+    to_iso = now.isoformat(timespec="seconds")
+    anchor_to = to_iso  # 推进锚点用；delta 下会抬到「窗口内最大 logged_at」以防重复覆盖
+    if mode == "day":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        window_label = "北京时间 %d月%d日 00:00 至今" % (start.month, start.day)
+        recs = _changes_since(ws, start, inclusive=True)
+        from_dt = start
+    else:
+        ck = _read_json_or(_digest_state_path(ws), None)
+        from_dt = _parse_time(ck.get("sent_at")) if isinstance(ck, dict) else None
+        if from_dt is not None and from_dt.tzinfo is not None:
+            from_dt = from_dt.astimezone(BEIJING)
+        if from_dt is None:
+            from_dt = now - datetime.timedelta(hours=seed_h)
+            seeded = True
+        else:
+            seeded = False
+        recs = _changes_since(ws, from_dt, inclusive=False)
+        # 锚点必须 >= 窗口内最大 logged_at，否则该记录下轮会被重复覆盖
+        # （防御时钟前移 / 未来时间戳；正常情况下 max_la <= to，锚点即 to）
+        _maxla = max((r.get("logged_at") for r in recs if r.get("logged_at")), default=None)
+        if _maxla:
+            _ml, _td = _parse_time(_maxla), _parse_time(to_iso)
+            if _ml is not None and _td is not None:
+                if _ml.tzinfo is not None:
+                    _ml = _ml.astimezone(BEIJING)
+                if _td.tzinfo is not None:
+                    _td = _td.astimezone(BEIJING)
+                if _ml > _td:
+                    anchor_to = _maxla
+        if seeded:
+            window_label = "首次简报（回溯近 %.0f 小时）%s 至 %s" % (
+                seed_h, _fmt_cn_short(from_dt), _fmt_cn_short(to_iso))
+        else:
+            window_label = "自上次简报 %s 至 %s" % (_fmt_cn_short(from_dt), _fmt_cn_short(to_iso))
+
     if not include_low:
         recs = [r for r in recs if r.get("significance") != "low"]
-    card = build_digest_card(ws, recs, beijing_now_str(), window_label)
+    card = build_digest_card(ws, recs, run_at, window_label)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    os.makedirs(os.path.join(ws, "out"), exist_ok=True)
     card_path = os.path.join(ws, "out", "card-digest-%s.json" % stamp)
     with open(card_path, "w", encoding="utf-8") as fh:
         json.dump(card, fh, ensure_ascii=False, indent=2)
     n = len(recs)
     print("每日变更摘要卡片（%s）：%s" % ("无变更" if n == 0 else "%d 条变更" % n, card_path))
+    print("  窗口：%s（模式 %s）" % (window_label, mode))
+
+    if mode == "delta":
+        # 只把本次 to 记进 pending，供 --commit 推进锚点；本步绝不推进（宁重勿漏）
+        try:
+            _atomic_write_json(_digest_pending_path(ws), {
+                "window_from": from_dt.isoformat(timespec="seconds"),
+                "window_to": anchor_to,
+                "count": n,
+                "card": os.path.basename(card_path),
+                "created_at": now_iso(),
+            })
+        except OSError as e:
+            print("写入摘要 pending 失败：%s" % e, file=sys.stderr)
+
     ncfg = notify_config(ws)
     chat_id = ncfg.get("chat_id")
     if chat_id:
         print("  lark-cli im +messages-send --as bot --chat-id %s "
               "--msg-type interactive --content - < %s" % (chat_id, card_path))
+        if mode == "delta":
+            print("  （发送 ok 后务必运行以推进锚点：python3 %s --digest --commit --workspace %s）"
+                  % (os.path.abspath(__file__), ws))
     else:
         print("  （未配置群聊目标 notify.chat_id，跳过群发；如需群发请配置）")
     return 0
+
+
+def _cmd_digest_commit(ws):
+    """delta 模式：把上次【已发送成功】的摘要窗口推进为锚点。
+
+    只读 state/digest_pending.json，把 checkpoint.sent_at 设为 pending.window_to
+    （= 上次 --digest 选取的上界，**绝不写"现在"**），并清掉 pending。
+    单调保护：待提交上界不晚于当前锚点则不倒退。无 pending 则无需提交。
+    发送失败时**不要**调用本命令 → 锚点不推进 → 下轮 --digest 自动重覆盖（宁重勿漏）。
+    """
+    with _digest_lock(ws):
+        pend = _read_json_or(_digest_pending_path(ws), None)
+        if not isinstance(pend, dict) or not pend.get("window_to"):
+            print("没有待提交的摘要窗口（digest_pending.json 缺失/为空）；无需 commit。")
+            return 0
+        to_iso = str(pend.get("window_to"))
+        to_dt = _parse_time(to_iso)
+        if to_dt is not None and to_dt.tzinfo is not None:
+            to_dt = to_dt.astimezone(BEIJING)
+        ck = _read_json_or(_digest_state_path(ws), None)
+        cur_dt = _parse_time(ck.get("sent_at")) if isinstance(ck, dict) and ck.get("sent_at") else None
+        if cur_dt is not None and cur_dt.tzinfo is not None:
+            cur_dt = cur_dt.astimezone(BEIJING)
+        if to_dt is not None and cur_dt is not None and to_dt <= cur_dt:
+            print("待提交窗口上界 %s 不晚于当前锚点，跳过（单调保护，不倒退）。" % to_iso)
+            try:
+                os.remove(_digest_pending_path(ws))
+            except OSError:
+                pass
+            return 0
+        data = {
+            "sent_at": to_iso,
+            "window_from": pend.get("window_from"),
+            "window_to": to_iso,
+            "count": pend.get("count"),
+            "committed_at": now_iso(),
+        }
+        try:
+            _atomic_write_json(_digest_state_path(ws), data)
+        except OSError as e:
+            print("提交摘要锚点失败：%s（未推进，下轮将重覆盖，宁重勿漏）" % e, file=sys.stderr)
+            return 1
+        try:
+            os.remove(_digest_pending_path(ws))
+        except OSError:
+            pass
+        print("摘要锚点已推进至 %s（该窗口及以前视为已交付，count=%s）。" % (to_iso, pend.get("count")))
+        return 0
 
 
 def build_health_card(alerts, run_at):
@@ -1149,6 +1324,8 @@ def main():
     ap.add_argument("--show", action="store_true", help="打印最近 20 条")
     ap.add_argument("--digest", action="store_true",
                    help="生成每日变更摘要卡片（聚合窗口内变更 + 当前不可用源；有无变更都发，不作心跳）")
+    ap.add_argument("--commit", action="store_true",
+                   help="配合 --digest：把上次已发送成功的摘要窗口推进为锚点（delta 模式；发送 ok 后调用）")
     ap.add_argument("--health", action="store_true",
                    help="对源健康跃迁（不可用/已恢复）发一次性告警；持续失联静音")
     ap.add_argument("--heartbeat", action="store_true",
@@ -1211,6 +1388,9 @@ def main():
             print("  lark-cli im +messages-send --as bot --chat-id %s "
                   "--msg-type interactive --content - < %s" % (chat_id, gpath))
         return 0
+
+    if args.commit:
+        return _cmd_digest_commit(ws)
 
     if args.digest:
         return _cmd_digest(ws)
