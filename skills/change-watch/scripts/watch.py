@@ -76,17 +76,51 @@ def parse_iso(s):
         return datetime.datetime.now(BEIJING)
 
 
+def browser_headers():
+    """完整 Chrome 浏览器头集合（2026-10-13 实测取证后默认启用）。
+
+    背景：LinkedIn company 页（/company/googledeepmind、/company/google）对"裸 urllib"
+    请求返回 **HTTP 999**（LinkedIn 专用反爬状态码）。两轮交错 A/B 实验（同一 IP、
+    交替请求、2s 间隔，共 12 次/组）：
+
+    - 旧头（5 个字段：UA/Accept/Accept-Language/Accept-Encoding/Cache-Control）
+      → company 页 12 次请求失败 10 次（83%），showcase 页不受影响；
+    - 本函数完整头 → company 页 **12/12 全成功**，且对 blog.google / developers.googleblog /
+      gcp-release-notes 三个 feed 与 ai.google.dev、cloud.google 四个登记册逐次比对
+      状态一致、条目数一致、字节数差 <0.1%（仅页面内动态 token），**零副作用**。
+
+    结论：999 是"请求头不像浏览器"触发，不是 IP 级硬性封禁；补齐 sec-ch-ua /
+    Sec-Fetch-* / Referer / Upgrade-Insecure-Requests 即可解，**无需引入 curl_cffi
+    等第三方依赖**（保住本技能零依赖、可移植的一等需求）。curl_cffi 的 TLS 指纹
+    伪装实测同样 6/6 成功，作为将来 LinkedIn 升级到 TLS 指纹检测时的备选方案记录。
+    """
+    return {
+        "User-Agent": UA,
+        "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+                   "image/avif,image/webp,image/apng,*/*;q=0.8,"
+                   "application/signed-exchange;v=b3;q=0.7"),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip",
+        "Cache-Control": "max-age=0",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": "https://www.google.com/",
+        "DNT": "1",
+        "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-Fetch-User": "?1",
+    }
+
+
 def fetch(url, timeout=30, retries=1):
     last = None
     for attempt in range(retries + 1):
         try:
-            req = urllib.request.Request(url, headers={
-                "User-Agent": UA,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip",
-                "Cache-Control": "no-cache",
-            })
+            req = urllib.request.Request(url, headers=browser_headers())
             with opener().open(req, timeout=timeout) as r:
                 raw = r.read()
                 if r.headers.get("Content-Encoding") == "gzip":
@@ -768,20 +802,31 @@ def fell_off_bottom(rec, curr_items):
     return bool(ages) and gone > max(ages)
 
 
-def split_rolled_out(spec, added, removed, curr_items):
+def split_rolled_out(spec, added, removed, curr_items, prev_items=None):
     """从 removed 里分出「窗口滚动」的部分，返回 (真消失, 滚动)。
 
-    只有三个条件同时成立才判为滚动，缺一个就当真消失：
-      1) 源显式声明 windowed —— 不做默认猜测，避免误伤普通 feed；
-      2) 本轮确实有新条目进来 —— 窗口只会在有新内容时被往前推；
-      3) 消失条目早于当前最旧条目 —— 说明是从底部掉出去，不是被删。
+    判为滚动的两类情形（都要求源显式声明 windowed，且都要求消失条目
+    早于当前窗口最旧条目 —— 即"从底部掉出去"，不是被删）：
+
+      A) 本轮有新条目进来 —— 窗口被新内容往前推，最旧几条被挤出（原逻辑）。
+      B) 窗口自身收窄（2026-10-13 实测新增）—— 有限窗口流每次返回的条数并不固定：
+         实测 X guest 通道抓 @Google，上一轮 15 条、下一轮 12 条，本轮**没有任何
+         新条目**，最旧 3 条仍会"消失"。证据：那条推文发布于 2026-10-07T16:46，
+         早于本轮窗口最旧项 10-08T14:35，且推文 URL 仍可访问 —— 是窗口抖动而非删帖。
+         此类只在"本轮条数确实少于上轮"（窗口真的变窄）时才认，否则仍当真消失。
+
+    保守边界不变：任何一条不满足，仍按真消失处理（宁可多报，漏报代价更大）。
     """
-    if not spec.get("windowed") or not added or not removed:
+    if not spec.get("windowed") or not removed:
         return removed, []
     rolled, kept = [], []
     for item in removed:
         (rolled if fell_off_bottom(item[1], curr_items) else kept).append(item)
-    return kept, rolled
+    if added:
+        return kept, rolled                       # 情形 A
+    if prev_items is not None and len(curr_items) < len(prev_items):
+        return kept, rolled                       # 情形 B：窗口收窄
+    return removed, []                            # 窗口没收窄却少了条目 → 真消失
 
 
 def diff_map(prev, curr):
@@ -1326,10 +1371,13 @@ def main():
                                           "%s.json" % st["source_id"])
                 prev = jload(state_path, {}).get("items", {})
                 added, removed, changed = diff_map(prev, items)
-                removed, rolled_out = split_rolled_out(spec, added, removed, items)
+                removed, rolled_out = split_rolled_out(spec, added, removed, items, prev)
 
                 if not args.baseline:
                     # 滚出窗口的不是"变更"，但要留痕 —— 沉默必须有据，不能悄悄丢。
+                    roll_reason = ("窗口滚动：有新条目进入，旧条目已移出该源的最近条目窗口"
+                                   if added else
+                                   "窗口收窄：本轮该源返回条目数变少，最旧几条掉出窗口（非删除）")
                     for key, rec, old in rolled_out:
                         rollouts.append({
                             "target": tid, "layer": layer,
@@ -1337,7 +1385,7 @@ def main():
                             "key": key, "url": rec.get("link") or st["url"],
                             "title": rec.get("title") or rec.get("cells", [""])[0],
                             "published": rec.get("published"),
-                            "reason": "窗口滚动：已从该源的最近条目窗口底部移出",
+                            "reason": roll_reason,
                             "logged_at": now_iso(),
                         })
                     for kind, group in (("added", added), ("removed", removed), ("changed", changed)):

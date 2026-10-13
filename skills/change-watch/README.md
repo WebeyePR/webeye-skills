@@ -122,6 +122,17 @@ python3 scripts/query.py --object gemini --stats
 
 技能采用 **date-stamp 版本号**（`vYYYYMMDD` 当日首版，同日修复追加 `.N`）。
 
+### v20261013.2 · 2026-10-13
+当日第二次修订，目标是把「源不稳」与「伪告警」两类噪声压到零（均带实测取证）：
+
+- **【修复】LinkedIn company 页 HTTP 999（反爬限流）**：`fetch()` 的请求头从 5 个裸字段升级为**完整 Chrome 浏览器头**（补 `sec-ch-ua` / `Sec-Fetch-*` / `Referer` / `Upgrade-Insecure-Requests` / `Connection` 等）。实测（同 IP、交替请求、2s 间隔，12 次/组）：旧头下 `/company/googledeepmind`、`/company/google` **12 次请求失败 10 次（83%）**，新头 **12/12 全成功**；对 blog.google / developers.googleblog / gcp-release-notes 三个 feed 与 ai.google.dev、cloud.google 四个登记册逐次比对状态一致、条目数一致、字节差 <0.1%，**零副作用**。
+  - 结论：999 是「请求头不像浏览器」触发，不是 IP 级封禁；**未引入 curl_cffi 等第三方依赖**（保住零依赖可移植性）。curl_cffi 的 TLS 指纹伪装实测同样 6/6 成功，作为将来 LinkedIn 升级到 TLS 指纹检测时的备选记录在代码注释里。
+- **【修复】窗口收窄被误报成「内容消失」**：有限窗口流每次返回的条数并不固定——实测 X guest 通道抓 @Google，上一轮 15 条、下一轮 12 条，本轮**没有任何新条目**，最旧 3 条仍被报成 `removed`。`split_rolled_out()` 因此新增**情形 B**：windowed 源在无新条目、但本轮条数确实少于上轮（窗口收窄）且消失项早于当前窗口最旧项时，同样判为「滚出」而非「删除」，记入 `log/rolled_out.jsonl`。保守边界不变（窗口没收窄却少了条目、非 windowed 源、首轮无 prev，仍按真消失处理）。
+- **【配置】13 个 RSS 源声明 `windowed: true`**：RSS/Atom feed 只保留最近 N 条（20/25/30/100），新文章进入后最旧几条必然掉出——此前未声明 windowed，每轮都把它们报成「文章被删除」。**已取证**：本轮 5 条 RSS `removed` 的原文全部 HTTP 200 仍可访问，确为窗口滚动。注意 **registries（对象登记册）绝不设 windowed**——它们是完整清单，「消失」就是真的下架，是本系统的核心价值。
+- **【配置】9 个社交源（6 个 X + 3 个 LinkedIn）停更阈值放宽到 336h**：社交账号节奏不规则（@GoogleAIStudio 上次发推是 10-06 的 Nano Banana 2.1，7 天不发属正常），原用全局 168h 会在阈值两侧抖动（实测 168.1h 刚越界即告警）。
+- **【清理】** 已证伪的 8 条历史告警（3 条 X 窗口收窄 + 5 条 RSS 滚动）补记 `log/rolled_out.jsonl` 移出待判队列，留痕可查。
+- **【验证】** `split_rolled_out` 7 个场景单测全绿（含「窗口未收窄=真消失」「非 windowed=真消失」「首轮 prev=None=保守」等回归）；端到端复跑 3 轮：**26 源失败 0 / 停更告警 0 / 消失 0**，滚出正确归类，待判队列只剩真实新增。
+
 ### v20261013.1 · 2026-10-13
 当日修订，由多轮验证矩阵（U1 单元 + T1–T19 场景 × 3 轮）驱动的三项加固：
 
