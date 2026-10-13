@@ -2,7 +2,7 @@
 name: change-watch
 description: 监控指定目标（公司/产品线/模型）的变更并沉淀为可查询的变更流水。适用于：想知道某公司最近发布了什么/下架了什么/改了什么价；要给某个产品线做持续变更监控并定时通知；要按时间线、类型、对象查看与检索历史变更并溯源到原文；需要"先分析判断再通知"，而不是把原文直接转发。触发场景举例："Google 最近有什么更新"、"盯着 Gemini 的模型上下架"、"这类变更定时推给我"、"上次那个模型的变更记录在哪"。
 description_en: Monitor changes of a target (company / product line / model) and accumulate them into a queryable change ledger. Use when you want to know what a company recently released / discontinued / repriced; run continuous change monitoring for a product line with scheduled notifications; retrieve and trace historical changes by timeline, type, or object back to the source; and "analyze-then-notify" rather than forwarding raw text. Trigger examples: "What's new from Google", "Watch Gemini's model additions/removals", "Push these changes to me on a schedule", "Where's the change record for that model".
-version: v20261013.2
+version: v20261014
 license: MIT
 agent_created: true
 ---
@@ -98,6 +98,11 @@ python3 <技能目录>/scripts/watch.py --baseline
 ```bash
 python3 <技能目录>/scripts/watch.py
 ```
+
+各信源**并发抓取**（26 源实测 38.7s → 12.5s），但结果与串行等价：结果按配置顺序返回，
+X 通道串行（共用 guest token、限流最严），单域名限流 `host_concurrency`，整轮有壁钟上限。
+想退回串行做对照排查，把 `settings.collect_concurrency` 设成 `1` 即可。
+同一工作区同时只允许一轮在跑：拿不到锁会**跳过本轮并返回 3**（不是故障，别重试覆盖）。
 
 产出 `<工作区>/out/latest.json`。**先看 `summary`**：
 
@@ -223,7 +228,7 @@ python3 <技能目录>/scripts/log_change.py --show         # 最近 20 条
 你正在按计划执行 change-watch 巡检。依次做：
 
 1. 抓取与差分：运行 `python3 <技能目录>/scripts/watch.py`。
-   退出码 1 = 配置错误（看 stderr 并报告，不要静默）；退出码 2 = 有源失败但仍有结果，或 `log_change.py` 本轮判断不完整/有非法记录（覆盖度缺失、判断记录格式非法，pending 已保留、下轮再问）——这两种都继续后续，不要中止整条流水线。
+   退出码 1 = 配置错误（看 stderr 并报告，不要静默）；退出码 2 = 有源失败但仍有结果，或 `log_change.py` 本轮判断不完整/有非法记录（覆盖度缺失、判断记录格式非法，pending 已保留、下轮再问）——这两种都继续后续，不要中止整条流水线；退出码 3 = 另一轮 watch 正在运行（单实例锁未拿到），本轮跳过，**不是故障，不要重试覆盖**，等下一轮即可。
 1.5 源健康一次性告警：运行 `python3 <技能目录>/scripts/log_change.py --health`（读本轮 latest.json 的跃迁；不可用/已恢复各发一次，持续失联静音；无跃迁则静默）。按 references/notify-card.md 降级链**发本人私信**（群聊不重复发，避免刷屏）。
 2. 读 <工作区>/out/latest.json 的 summary：
    - total == 0 且 health.down 为空、stale_sources 为空 → 本轮干净，结束（默认不发卡、不打扰）。
@@ -285,7 +290,9 @@ python3 <技能目录>/scripts/log_change.py --show         # 最近 20 条
 10. **未判的变更会自己回来，别嫌烦**：`state/pending.json` 里的条目下一轮会重新出现在 `changes` 里（带 `reopened: true`）。这是刻意设计——不这样做，漏判就等于永久丢失。会一直带回直到判定，超过 24 小时未判才进 `log/unjudged.jsonl`。
 11. **配置里出现未知字段会直接中止运行**：`watch.py` 用字段白名单校验，拼错的键会被点名。别去"绕过"它，那是防止配置漂移变成"看起来在跑其实没生效"的闸门。
 12. **说明里的版本号/日期/价格会被核对**：`log_change.py` 逐个比对原文，对不上会标 `grounding: unverified` 并在 stderr 点名。看到就回原文改，别放着不管。
-13. **解析不出内容 = 源失败，不是"抓到了 10 条"**：RSS 解析器遇到"标题全空"会显式报错让源标 FAIL（LinkedIn / X 同理）。空条目最危险的地方是看起来抓到了，但差分只认 URL——正文改了发现不了。已实测过一次：`developer.chrome.com` 的 feed 用 CDATA 包裹正文，剥标签时把整段 `<![CDATA[...]]>` 当成一个标签删掉了，10 条条目标题与正文全空却报 ok。某源突然 FAIL 时，先人工看源是不是改版了。
+13. **表格里的 colspan 分组行不是数据**：清单页常在每个分组之间夹一行单单元格的小节标题（实测 `ai.google.dev` 弃用清单有 14 行 "Preview models"）。它们第一列同名，会被加 `#2 #3 …` 后缀；页面只要增删一个分组，后缀就整体错位，凭空造出一批"变化/消失"。脚本现已跳过这类行（判据：本表典型列数 ≥2 且该行只有 1 列且文本很短）。**别把判据放宽成"列数少于典型"** —— 实测会误删 `gemini-api-models` 里 20 条 2 列的真实记录（名称 + 模型 ID）。
+14. **`log_change.py` 的漏判点名依赖 `out/latest.json`**：覆盖度 = 本轮变更 id 减去已判 id。若该文件不存在，基准为空集，校验会**静默判定为全部覆盖**，漏判无人点名。脚本现已在这种情况下显式告警并回退出码 2。手工补录（不跑 `watch.py` 直接 `--input`）时知悉该校验被跳过。
+15. **解析不出内容 = 源失败，不是"抓到了 10 条"**：RSS 解析器遇到"标题全空"会显式报错让源标 FAIL（LinkedIn / X 同理）。空条目最危险的地方是看起来抓到了，但差分只认 URL——正文改了发现不了。已实测过一次：`developer.chrome.com` 的 feed 用 CDATA 包裹正文，剥标签时把整段 `<![CDATA[...]]>` 当成一个标签删掉了，10 条条目标题与正文全空却报 ok。某源突然 FAIL 时，先人工看源是不是改版了。
 
 ## 可移植性
 

@@ -1424,6 +1424,10 @@ def main():
         return 1
 
     src_texts = source_text_by_id(ws)
+    # 覆盖度校验的比对基准就是 latest.json。它不存在时 src_texts 为空，
+    # "空集合 - 任何集合"恒为空 → 校验会**静默判定为全部覆盖**，漏判没人点名。
+    # 这种失效最难发现（看起来一切正常），必须显式说出口。
+    coverage_unverifiable = not os.path.exists(os.path.join(ws, "out", "latest.json"))
     ver = criteria_version()
     appended, skipped, invalid, ungrounded, discarded = [], [], [], [], []
     handled_ids = set()
@@ -1530,6 +1534,11 @@ def main():
               file=sys.stderr)
         print("  它们留在待判队列里，下轮 watch 会再问一次（按未判年龄过期，默认 24 小时，"
               "与采集频次无关；超时才记入 log/unjudged.jsonl）。", file=sys.stderr)
+    elif coverage_unverifiable:
+        print("\n⚠ out/latest.json 不存在，本轮**没有做**覆盖度校验（漏判不会被点名）。",
+              file=sys.stderr)
+        print("  正常流程是「先 watch.py 再落盘判断」；若这次确属手工补录，请知悉该校验被跳过。",
+              file=sys.stderr)
 
     to_notify = [r for r in appended if r.get("notify") and not args.no_notify]
     if to_notify:
@@ -1591,7 +1600,7 @@ def main():
     # ② 判断记录格式非法（缺必填 / change_kind·significance 取值错 / change_id 自相矛盾）。
     # 两者都让编排/自动化知道本轮判断没做完或没做对。与 watch.py 退出码 2 语义不同
     #（那边是"有源抓取失败"），但自动化统一按"非 0 但不中止"处理即可。
-    incomplete = coverage_incomplete or bool(invalid)
+    incomplete = coverage_incomplete or coverage_unverifiable or bool(invalid)
     return 2 if incomplete else 0
 
 

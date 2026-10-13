@@ -17,7 +17,8 @@ change-watch :: 抓取 + 差分
   watch.py --target google     # 只跑某个目标
   watch.py --workspace ~/x     # 指定工作区（默认 ~/.change-watch）
 
-退出码：0 正常；2 有源抓取失败（变更集仍会产出）；1 参数/配置错误
+退出码：0 正常；2 有源抓取失败（变更集仍会产出）；1 参数/配置错误；
+        3 另一轮 watch 正在运行（单实例锁未拿到，本轮跳过 —— 不是故障，勿重试覆盖）
 """
 import argparse
 import datetime
@@ -27,14 +28,21 @@ import html as htmlmod
 import http.cookiejar
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+try:                      # 单实例锁用 flock；无 fcntl 的平台（Windows）退化为不锁定
+    import fcntl
+except ImportError:       # pragma: no cover - 平台差异
+    fcntl = None
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG = os.path.join(SKILL_DIR, "config", "targets.json")
@@ -43,16 +51,20 @@ DEFAULT_WS = os.path.join(os.path.expanduser("~"), ".change-watch")
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
-_OPENER = None
+# CookieJar **不是线程安全的**，并发采集时多线程共享一个 jar 会互相踩（cookie 覆盖 /
+# 迭代中修改）。所以每个线程各持一份 opener：cookie 只在自己这条请求链里流转，既能
+# 解决 ai.google.dev 的 302 循环，又天然无竞争。并发度见 COLLECT_* 常量。
+_TLS = threading.local()
 
 
 def opener():
     """浏览器头 + CookieJar：ai.google.dev 对普通 UA 会 302 循环，必须带 Cookie。"""
-    global _OPENER
-    if _OPENER is None:
+    op = getattr(_TLS, "opener", None)
+    if op is None:
         cj = http.cookiejar.CookieJar()
-        _OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-    return _OPENER
+        op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+        _TLS.opener = op
+    return op
 
 
 # 所有对外时间戳统一为北京时间（东八区），与 log_change.py 保持一致。
@@ -248,19 +260,39 @@ def parse_tables(body, key_column=0, drop_header_like=True):
     out = []
     seen = {}
     for tbl_i, tbl in enumerate(re.findall(r"<table\b.*?</table>", body, re.S | re.I)):
-        first_row = True
+        # 先摸清这张表"正常数据行有几列"（取列数的众数），用来识别**分组/小节标题行**。
+        # 实测：ai.google.dev 的弃用清单里，每组模型之间夹了一行 colspan 的
+        # "Preview models"（只有 1 个单元格）。它不是任何模型的记录，却被当成数据行收进来；
+        # 更糟的是 13 个分组的第一列同名，解析器只能给它们加 #2 #3 … 后缀 ——
+        # 页面只要新增/删除一个分组，后面所有后缀就整体错位，凭空制造一批"变化/消失"。
+        # 判据：列数明显少于本表常态 + 文本很短 → colspan 小节标题，不是数据。
+        # 单列名单表（typical=1）不受影响——没有行会少于 typical。
+        widths, parsed = {}, []
         for row in re.findall(r"<tr\b.*?</tr>", tbl, re.S | re.I):
             if re.search(r"<th\b", row, re.I):      # 显式表头行跳过
-                first_row = False
+                parsed.append(None)
                 continue
             cells = [norm(_TAG.sub(" ", c)) for c in re.findall(r"<td\b.*?</td>", row, re.S | re.I)]
-            cells = [c for c in cells]
+            parsed.append(cells)
+            if cells:
+                widths[len(cells)] = widths.get(len(cells), 0) + 1
+        typical = max(widths.items(), key=lambda kv: (kv[1], kv[0]))[0] if widths else 0
+        first_row = True
+        for cells in parsed:
+            if cells is None:
+                first_row = False
+                continue
             if drop_header_like and first_row and looks_like_header(cells):
                 first_row = False
                 continue                             # 隐式表头行（用 <td> 渲染的）
             first_row = False
             if not cells or key_column >= len(cells):
                 continue
+            # 判据收紧到"只有 1 列"：实测 gemini-api-models 里 20 条真实记录是 2 列
+            # （名称 + 模型 ID，而该表典型是 3 列），用"少于典型列数"会把它们整批误删。
+            # 单列名单表 typical=1，本条永不触发，也不受影响。
+            if typical >= 2 and len(cells) == 1 and len(cells[0]) <= 60:
+                continue                             # colspan 小节标题（如 "Preview models"）
             key = cells[key_column]
             if not key:
                 continue
@@ -350,6 +382,23 @@ X_USER_BY_SCREEN_NAME_URL = "https://api.x.com/graphql/AWbeRIdkLtqTRN7yL_H8yw/Us
 X_USER_TWEETS_URL = "https://api.x.com/graphql/N2tFDY-MlrLxXJ9F_ZxJGA/UserTweets?variables=%7B%22userId%22%3A%2244196397%22%2C%22count%22%3A20%2C%22includePromotedContent%22%3Atrue%2C%22withQuickPromoteEligibilityTweetFields%22%3Atrue%2C%22withVoice%22%3Atrue%7D&features=%7B%22rweb_video_screen_enabled%22%3Afalse%2C%22profile_label_improvements_pcf_label_in_post_enabled%22%3Atrue%2C%22responsive_web_profile_redirect_enabled%22%3Afalse%2C%22rweb_tipjar_consumption_enabled%22%3Afalse%2C%22verified_phone_label_enabled%22%3Afalse%2C%22creator_subscriptions_tweet_preview_api_enabled%22%3Atrue%2C%22responsive_web_graphql_timeline_navigation_enabled%22%3Atrue%2C%22responsive_web_graphql_skip_user_profile_image_extensions_enabled%22%3Afalse%2C%22premium_content_api_read_enabled%22%3Afalse%2C%22communities_web_enable_tweet_community_results_fetch%22%3Atrue%2C%22c9s_tweet_anatomy_moderator_badge_enabled%22%3Atrue%2C%22responsive_web_grok_analyze_button_fetch_trends_enabled%22%3Afalse%2C%22responsive_web_grok_analyze_post_followups_enabled%22%3Atrue%2C%22responsive_web_jetfuel_frame%22%3Atrue%2C%22responsive_web_grok_share_attachment_enabled%22%3Atrue%2C%22responsive_web_grok_annotations_enabled%22%3Atrue%2C%22articles_preview_enabled%22%3Atrue%2C%22responsive_web_edit_tweet_api_enabled%22%3Atrue%2C%22graphql_is_translatable_rweb_tweet_is_translatable_enabled%22%3Atrue%2C%22view_counts_everywhere_api_enabled%22%3Atrue%2C%22longform_notetweets_consumption_enabled%22%3Atrue%2C%22responsive_web_twitter_article_tweet_consumption_enabled%22%3Atrue%2C%22tweet_awards_web_tipping_enabled%22%3Afalse%2C%22responsive_web_grok_show_grok_translated_post%22%3Atrue%2C%22responsive_web_grok_analysis_button_from_backend%22%3Atrue%2C%22post_ctas_fetch_enabled%22%3Atrue%2C%22freedom_of_speech_not_reach_fetch_enabled%22%3Atrue%2C%22standardized_nudges_misinfo%22%3Atrue%2C%22tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled%22%3Atrue%2C%22longform_notetweets_rich_text_read_enabled%22%3Atrue%2C%22longform_notetweets_inline_media_enabled%22%3Atrue%2C%22responsive_web_grok_image_annotation_enabled%22%3Atrue%2C%22responsive_web_grok_imagine_annotation_enabled%22%3Atrue%2C%22responsive_web_grok_community_note_auto_translation_is_enabled%22%3Afalse%2C%22responsive_web_enhance_cards_enabled%22%3Afalse%7D&fieldToggles=%7B%22withArticlePlainText%22%3Afalse%7D"
 
 _X_GUEST = {"token": None}
+# 并发下多个线程会同时发现 token 为空 → 各激活一个（浪费额度、加剧游客限流）。
+# 加这把锁保证一次运行只激活一个并复用。
+_X_TOKEN_LOCK = threading.Lock()
+# X guest 通道共用一个 token、限流最严，默认**完全串行**（与并发改造前的时序等价，
+# 行为差异最小）。要提速就把 X_CONCURRENCY 调大，代价是更容易撞 429。
+X_CONCURRENCY = 1
+_X_GQL_SEM = threading.Semaphore(X_CONCURRENCY)
+
+# ---------- 并发采集参数（settings 可覆盖，见 ALLOWED_SETTINGS） ----------
+# 全局并发度：26 个源同时打出去既没必要也容易被当成抓取行为，默认 6 个线程。
+DEFAULT_COLLECT_CONCURRENCY = 6
+# 单 host 并发度：同一域名最多同时几个请求。blog.google 有 4 个源、cloud.google 3 个，
+# 不限流的话一轮里对同一域名打出 3~4 个并发请求，反爬概率显著上升。默认 2。
+DEFAULT_HOST_CONCURRENCY = 2
+# 整轮采集的壁钟上限（秒）。超过就把还没回来的源判失败并继续出结果，
+# 防止某个源卡住（慢 TLS/半开连接）把整条定时任务拖死。
+DEFAULT_WALL_CLOCK_SECONDS = 300.0
 
 # guest 通道是免登录的公共接口，抖动是常态，不是我方错误。实测证据：
 # 冷启动首连握手要 15~16 秒（原写死 20s 超时，余量只剩 4 秒），已真实出现过一次
@@ -368,30 +417,45 @@ def _x_retryable(exc):
 
 
 def x_guest_token(timeout=X_GUEST_TIMEOUT):
-    """激活一个 guest token（一次运行内复用）。免登录，但受 X 的游客限流约束。"""
-    if _X_GUEST["token"] is not None:
-        return _X_GUEST["token"]
-    last = None
-    for attempt in range(X_RETRIES + 1):
-        try:
-            req = urllib.request.Request(
-                "https://api.x.com/1.1/guest/activate.json",
-                data=b"", method="POST",
-                headers={"Authorization": "Bearer " + X_BEARER, "User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                _X_GUEST["token"] = json.loads(r.read().decode("utf-8"))["guest_token"]
+    """激活一个 guest token（一次运行内复用）。免登录，但受 X 的游客限流约束。
+
+    并发安全：整个函数持 _X_TOKEN_LOCK，未拿到 token 的线程会等第一个线程激活完，
+    而不是各自激活一个（多激活 = 白白消耗游客额度，且更容易被限流）。
+    """
+    with _X_TOKEN_LOCK:
+        if _X_GUEST["token"] is not None:
             return _X_GUEST["token"]
-        except Exception as exc:  # noqa: BLE001 - 逐个记录，最后一次抛给调用方
-            last = exc
-            if attempt < X_RETRIES and _x_retryable(exc):
-                time.sleep(X_RETRY_BASE_SLEEP * (attempt + 1))
-                continue
-            break
-    raise last
+        last = None
+        for attempt in range(X_RETRIES + 1):
+            try:
+                req = urllib.request.Request(
+                    "https://api.x.com/1.1/guest/activate.json",
+                    data=b"", method="POST",
+                    headers={"Authorization": "Bearer " + X_BEARER, "User-Agent": UA})
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    _X_GUEST["token"] = json.loads(r.read().decode("utf-8"))["guest_token"]
+                return _X_GUEST["token"]
+            except Exception as exc:  # noqa: BLE001 - 逐个记录，最后一次抛给调用方
+                last = exc
+                if attempt < X_RETRIES and _x_retryable(exc):
+                    time.sleep(X_RETRY_BASE_SLEEP * (attempt + 1))
+                    continue
+                break
+        raise last
 
 
 def x_gql(endpoint, timeout, **var_over):
-    """按模板调 X 的 GraphQL，覆盖 variables 里的指定键，返回解析后的 JSON。"""
+    """按模板调 X 的 GraphQL，覆盖 variables 里的指定键，返回解析后的 JSON。
+
+    并发安全：X 的 guest 通道共用 token 且游客限流最严，这里用信号量把 X 请求串行化
+    （X_CONCURRENCY，默认 1）。其它源的并发不受它影响。
+    """
+    with _X_GQL_SEM:
+        return _x_gql_impl(endpoint, timeout, **var_over)
+
+
+def _x_gql_impl(endpoint, timeout, **var_over):
+    """x_gql 的实现体（调用方已持有 X 并发信号量）。"""
     u = urllib.parse.urlsplit(endpoint)
     q = dict(urllib.parse.parse_qsl(u.query, keep_blank_values=True))
     variables = json.loads(q.get("variables", "{}"))
@@ -610,7 +674,11 @@ def hours_since(iso_text):
 # heartbeat: 巡检心跳节流配置（log_change.py --heartbeat 读取），与 README/config 模板一致。
 ALLOWED_TOP = {"settings", "targets", "version", "notify", "digest", "heartbeat"}
 ALLOWED_SETTINGS = {"stale_after_hours", "request_timeout_seconds",
-                    "request_retries", "min_changes_to_notify"}
+                    "request_retries", "min_changes_to_notify",
+                    # 并发采集：全局并发度 / 单域名并发度 / 整轮壁钟上限（秒）。
+                    # collect_concurrency=1 即退回串行（排查问题时用它做对照）。
+                    "collect_concurrency", "host_concurrency",
+                    "collect_wall_clock_seconds"}
 ALLOWED_TARGET = {"id", "name", "short_name", "notes", "streams", "registries"}
 ALLOWED_SOURCE_COMMON = {"id", "label", "kind", "url", "notes",
                          "timeout_seconds", "stale_after_hours",
@@ -700,9 +768,9 @@ def newest_published(pairs):
     return (round(best_h, 1) if best_h is not None else None), best_v
 
 
-def collect_source(cfg_settings, layer, target_id, spec):
-    """抓一个源，返回 (status_dict, items_map)。异常不抛出，记进 status。"""
-    st = {
+def new_status(target_id, spec, layer):
+    """一个源的空白状态骨架（正常采集、异常兜底、超时兜底共用）。"""
+    return {
         "target": target_id,
         "layer": layer,
         "source_id": spec["id"],
@@ -717,6 +785,42 @@ def collect_source(cfg_settings, layer, target_id, spec):
         "stale_hours": None,
         "stale": False,
     }
+
+
+def fail_status(target_id, spec, layer, error):
+    """构造一个"这个源没抓到"的状态（error 已是人类可读的一句话）。"""
+    st = new_status(target_id, spec, layer)
+    st["error"] = error
+    return st
+
+
+_HOST_SEMS = {}
+_HOST_SEMS_LOCK = threading.Lock()
+
+
+def host_semaphore(host, limit):
+    """同一域名的并发闸（limit<=0 表示不限流）。
+
+    一轮里对同一域名打出 3~4 个并发请求，被当成抓取行为的概率明显上升
+    （blog.google 4 个源、cloud.google.com 3 个源、linkedin.com 3 个源）。
+    默认每域名最多 2 个并发：既有提速，又不至于像爬虫。
+    """
+    if not limit or limit <= 0:
+        return None
+    with _HOST_SEMS_LOCK:
+        s = _HOST_SEMS.get(host)
+        if s is None:
+            s = threading.Semaphore(int(limit))
+            _HOST_SEMS[host] = s
+        return s
+
+
+def collect_source(cfg_settings, layer, target_id, spec, host_concurrency=0):
+    """抓一个源，返回 (status_dict, items_map)。异常不抛出，记进 status。
+
+    host_concurrency>0 时限制同一域名的并发数（只在并发采集时传入）。
+    """
+    st = new_status(target_id, spec, layer)
     try:
         kind = spec.get("kind", "rss")
         timeout = int(spec.get("timeout_seconds",
@@ -741,9 +845,19 @@ def collect_source(cfg_settings, layer, target_id, spec):
             st["ok"] = True
             st["items"] = len(pairs)
             return st, dict(pairs)
-        code, body, final = fetch(spec["url"],
-                                  timeout=timeout,
-                                  retries=int(cfg_settings.get("request_retries", 1)))
+        # 域名闸只做**有限等待**：一个源卡住（半开连接、慢 TLS）会一直占着闸位，
+        # 同域名的其它源便全被拖到超时，一个慢源变成一批源失败。等 timeout 这么久
+        # 还没轮到就不再排队 —— 限流是软约束，不能反过来把可用性拖垮。
+        sem = host_semaphore(urllib.parse.urlsplit(spec["url"]).netloc, host_concurrency)
+        if sem is not None and not sem.acquire(timeout=max(1.0, float(timeout))):
+            sem = None
+        try:
+            code, body, final = fetch(spec["url"],
+                                      timeout=timeout,
+                                      retries=int(cfg_settings.get("request_retries", 1)))
+        finally:
+            if sem is not None:
+                sem.release()
         st["http"] = code
         if kind == "rss":
             pairs = parse_feed(body)
@@ -763,6 +877,120 @@ def collect_source(cfg_settings, layer, target_id, spec):
     except Exception as exc:  # noqa: BLE001
         st["error"] = "%s: %s" % (type(exc).__name__, exc)
         return st, {}
+
+
+def _num_setting(settings, key, default, lo, hi):
+    """读数值型 setting：写错不崩，降级为默认并在 stderr 点名（静默忽略会变成"没生效"）。"""
+    raw = settings.get(key, default)
+    if raw is None:
+        return default
+    try:
+        v = type(default)(raw)
+    except (TypeError, ValueError):
+        print("settings.%s=%r 不是数字，按默认 %s 处理" % (key, raw, default), file=sys.stderr)
+        return default
+    if v < lo or v > hi:
+        print("settings.%s=%s 超出 [%s, %s]，按默认 %s 处理"
+              % (key, v, lo, hi, default), file=sys.stderr)
+        return default
+    return v
+
+
+def collect_all(settings, jobs):
+    """并发采集 jobs（[(tid, layer, spec), ...]），返回**与 jobs 同序**的 [(st, items)]。
+
+    三条硬约束（都是为了"并发不改变结果"）：
+
+    1. **结果必须按配置顺序返回**：stdout 与 latest.json 的 sources 顺序不随完成情况
+       抖动，diff 出来的内容才可复现、可对照。
+    2. **daemon 工作线程**：整轮超时后进程能立刻退出。刻意不用 ThreadPoolExecutor ——
+       它的线程是非 daemon 的，解释器退出时会 join，卡住的源会把定时任务整体拖死，
+       而这正是加壁钟上限想要避免的事。
+    3. **单源异常 / 超时不外溢**：任何一个源的问题只体现为它自己 ok=False，
+       其余源照常出结果（超时的记为 TimeoutError，进入健康计数，不会静默消失）。
+    """
+    n = len(jobs)
+    results = [None] * n
+    if n == 0:
+        return []
+    concurrency = _num_setting(settings, "collect_concurrency",
+                               DEFAULT_COLLECT_CONCURRENCY, 1, 32)
+    host_conc = _num_setting(settings, "host_concurrency",
+                             DEFAULT_HOST_CONCURRENCY, 0, 16)
+    wall = _num_setting(settings, "collect_wall_clock_seconds",
+                        DEFAULT_WALL_CLOCK_SECONDS, 5.0, 3600.0)
+    if n == 1 or concurrency <= 1:
+        for i, (tid, layer, spec) in enumerate(jobs):
+            try:
+                results[i] = collect_source(settings, layer, tid, spec)
+            except Exception as exc:  # noqa: BLE001 - collect_source 已兜底，这里是双保险
+                results[i] = (fail_status(tid, spec, layer, "WorkerError: %s" % exc), {})
+        return results
+
+    q = queue.Queue()
+    for i, job in enumerate(jobs):
+        q.put((i,) + tuple(job))
+
+    def _worker():
+        while True:
+            try:
+                i, tid, layer, spec = q.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                results[i] = collect_source(settings, layer, tid, spec, host_conc)
+            except Exception as exc:  # noqa: BLE001
+                results[i] = (fail_status(tid, spec, layer, "WorkerError: %s" % exc), {})
+
+    threads = [threading.Thread(target=_worker, name="cw-collect-%d" % k, daemon=True)
+               for k in range(min(concurrency, n))]
+    for t in threads:
+        t.start()
+    # 轮询而不是无脑 join 到 deadline：绝大多数轮次里所有源都会提前跑完，
+    # 这时应当立刻往下走；只有真有源卡住时才耗到壁钟上限。
+    deadline = time.monotonic() + wall
+    while time.monotonic() < deadline:
+        if all(r is not None for r in results):
+            break
+        time.sleep(0.05)
+    for i in range(n):
+        if results[i] is None:
+            tid, layer, spec = jobs[i]
+            results[i] = (fail_status(tid, spec, layer,
+                                      "TimeoutError: 整轮采集超过 %.0fs 仍未返回" % wall), {})
+    return results
+
+
+# ---------- 单实例锁（两个 watch 同时跑会互相踩状态） ----------
+
+_LOCK_FH = None
+
+
+def acquire_run_lock(ws):
+    """同一工作区同时只允许一轮 watch 在跑。返回 (ok, 说明)。
+
+    两轮并发会各自读旧基线、各自写 latest.json / pending.json，结果是谁的变更集都不完整
+    （且互相覆盖），是最难排查的一类"看起来在跑、其实漏了"。所以拿不到锁就**直接退出**，
+    而不是继续跑：跳过一轮的代价远小于状态错乱。
+    """
+    global _LOCK_FH
+    if fcntl is None:
+        return True, "（当前平台没有 flock，跳过单实例锁）"
+    path = os.path.join(ws, "state", "watch.lock")
+    try:
+        fh = open(path, "a+")
+    except OSError as exc:
+        return True, "（无法创建锁文件 %s，跳过单实例锁：%s）" % (path, exc)
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            fh.close()
+        except OSError:
+            pass
+        return False, "另一轮 watch 正在运行（锁 %s 未释放），本轮跳过，避免两轮互相覆盖状态" % path
+    _LOCK_FH = fh          # 必须保持引用：fd 被 GC 关闭 = 锁提前释放
+    return True, ""
 
 
 def same_barring_loss(a, b):
@@ -1324,6 +1552,15 @@ def main():
         return 1
     settings = cfg.get("settings", {})
 
+    # 单实例锁：两轮 watch 并发会各自基于同一份旧基线算 diff，再互相覆盖 latest.json /
+    # pending.json —— 结果是谁的变更集都不完整，而且极难排查。拿不到锁就跳过本轮。
+    ok, lock_msg = acquire_run_lock(ws)
+    if not ok:
+        print(lock_msg, file=sys.stderr)
+        return 3
+    if lock_msg:
+        print("[INFO] %s" % lock_msg, file=sys.stderr)
+
     health = load_health(ws)
     changes = []
     # 有限窗口流（X 时间线、LinkedIn 展示页）里从窗口底部滚出去的条目。
@@ -1337,13 +1574,25 @@ def main():
     statuses = []
     failed = 0
 
+    # 先把所有源并发抓完（collect_all 保证结果与 jobs 同序），
+    # 再按配置顺序逐个走差分 —— 这样 stdout 与 latest.json 的顺序不受完成先后影响。
+    jobs = []
     for target in cfg.get("targets", []):
         tid = target["id"]
         if args.target and tid != args.target:
             continue
         for layer, field in (("stream", "streams"), ("registry", "registries")):
             for spec in target.get(field, []):
-                st, items = collect_source(settings, layer, tid, spec)
+                jobs.append((tid, layer, spec))
+    _results = iter(collect_all(settings, jobs))
+
+    for target in cfg.get("targets", []):
+        tid = target["id"]
+        if args.target and tid != args.target:
+            continue
+        for layer, field in (("stream", "streams"), ("registry", "registries")):
+            for spec in target.get(field, []):
+                st, items = next(_results)
                 hrec, transition = update_health(
                     health, "%s/%s" % (tid, st["source_id"]),
                     st["ok"], st.get("error"), now_iso())
