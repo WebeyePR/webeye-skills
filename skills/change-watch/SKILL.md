@@ -2,7 +2,7 @@
 name: change-watch
 description: 监控指定目标（公司/产品线/模型）的变更并沉淀为可查询的变更流水。适用于：想知道某公司最近发布了什么/下架了什么/改了什么价；要给某个产品线做持续变更监控并定时通知；要按时间线、类型、对象查看与检索历史变更并溯源到原文；需要"先分析判断再通知"，而不是把原文直接转发。触发场景举例："Google 最近有什么更新"、"盯着 Gemini 的模型上下架"、"这类变更定时推给我"、"上次那个模型的变更记录在哪"。
 description_en: Monitor changes of a target (company / product line / model) and accumulate them into a queryable change ledger. Use when you want to know what a company recently released / discontinued / repriced; run continuous change monitoring for a product line with scheduled notifications; retrieve and trace historical changes by timeline, type, or object back to the source; and "analyze-then-notify" rather than forwarding raw text. Trigger examples: "What's new from Google", "Watch Gemini's model additions/removals", "Push these changes to me on a schedule", "Where's the change record for that model".
-version: v20261014.1
+version: v20261014.2
 license: MIT
 agent_created: true
 ---
