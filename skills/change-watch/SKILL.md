@@ -2,7 +2,7 @@
 name: change-watch
 description: 监控指定目标（公司/产品线/模型）的变更并沉淀为可查询的变更流水。适用于：想知道某公司最近发布了什么/下架了什么/改了什么价；要给某个产品线做持续变更监控并定时通知；要按时间线、类型、对象查看与检索历史变更并溯源到原文；需要"先分析判断再通知"，而不是把原文直接转发。触发场景举例："Google 最近有什么更新"、"盯着 Gemini 的模型上下架"、"这类变更定时推给我"、"上次那个模型的变更记录在哪"。
 description_en: Monitor changes of a target (company / product line / model) and accumulate them into a queryable change ledger. Use when you want to know what a company recently released / discontinued / repriced; run continuous change monitoring for a product line with scheduled notifications; retrieve and trace historical changes by timeline, type, or object back to the source; and "analyze-then-notify" rather than forwarding raw text. Trigger examples: "What's new from Google", "Watch Gemini's model additions/removals", "Push these changes to me on a schedule", "Where's the change record for that model".
-version: v20261014
+version: v20261014.1
 license: MIT
 agent_created: true
 ---
@@ -277,7 +277,7 @@ python3 <技能目录>/scripts/log_change.py --show         # 最近 20 条
 ## 已知陷阱（都是实测出来的，别踩）
 
 1. **`ai.google.dev` 对普通 User-Agent 返回 302 无限循环** —— 看起来像"页面不存在"。脚本已内置完整浏览器头 + CookieJar，**不要**为了"简化"把它去掉。
-2. **发布说明类的 RSS 可能比页面旧**：`cloud.google.com` 的发布说明 feed 实测停更，而同域 HTML 页面仍在更新。**发布说明要差分 HTML，别信它的 feed。**
+2. **发布说明类的 RSS 是"活文档"，别被它的更新节奏吓到**：`cloud.google.com/feeds/gcp-release-notes.xml` 每条 = 一天的汇总，Google 会在当天反复回填编辑（实测单条一天内变更多次），且 **30 条 entry 共用同一个链接**。脚本已按 Atom `id` 建键（见陷阱 19）；看到该源报整批 `changed` 时，先怀疑键退化成了位置序号，别当成"内容真变了"。注意区分：**Vertex AI Release Notes 那个 feed 实测停更约 7 个月**（不要配置它）；GCP 发布说明 feed 是活的，今天仍在产出真实变更。
 3. **时间戳不可跨源比较**：同一篇公告，`blog.google` 与 `cloud.google.com` 的自报时间实测差约 7 小时。记录时各源各记。
 4. **`blog.google` 系列是唯一自我一致的时间基准**：RSS 时间戳 == 页面自报时间、带明确 `+00:00`。要判定"哪个更新"，以它为准。
 5. **清单页会改版**：`html_tables` 依赖表格结构。若某 registry 突然报"整表消失"，先怀疑页面改版，再去人工看一眼，别直接当成"全部下架"。
@@ -293,6 +293,10 @@ python3 <技能目录>/scripts/log_change.py --show         # 最近 20 条
 13. **表格里的 colspan 分组行不是数据**：清单页常在每个分组之间夹一行单单元格的小节标题（实测 `ai.google.dev` 弃用清单有 14 行 "Preview models"）。它们第一列同名，会被加 `#2 #3 …` 后缀；页面只要增删一个分组，后缀就整体错位，凭空造出一批"变化/消失"。脚本现已跳过这类行（判据：本表典型列数 ≥2 且该行只有 1 列且文本很短）。**别把判据放宽成"列数少于典型"** —— 实测会误删 `gemini-api-models` 里 20 条 2 列的真实记录（名称 + 模型 ID）。
 14. **`log_change.py` 的漏判点名依赖 `out/latest.json`**：覆盖度 = 本轮变更 id 减去已判 id。若该文件不存在，基准为空集，校验会**静默判定为全部覆盖**，漏判无人点名。脚本现已在这种情况下显式告警并回退出码 2。手工补录（不跑 `watch.py` 直接 `--input`）时知悉该校验被跳过。
 15. **解析不出内容 = 源失败，不是"抓到了 10 条"**：RSS 解析器遇到"标题全空"会显式报错让源标 FAIL（LinkedIn / X 同理）。空条目最危险的地方是看起来抓到了，但差分只认 URL——正文改了发现不了。已实测过一次：`developer.chrome.com` 的 feed 用 CDATA 包裹正文，剥标签时把整段 `<![CDATA[...]]>` 当成一个标签删掉了，10 条条目标题与正文全空却报 ok。某源突然 FAIL 时，先人工看源是不是改版了。
+16. **X 的纯媒体帖按约定直接忽略**：视频/图片帖常常没有任何正文，`full_text` 只剩一条指向**本条推文自己媒体附件**的 t.co 短链——无可读文本，判不了任何东西。脚本对"正文仅剩一个 t.co 短链 + 有媒体实体 + 没有文章链接"的推文**不进基线、不产变更**（用户明确要求"纯视频忽略"；曾每天制造 3 条"待确认"噪音）。**带了图说的视频帖不受影响**（有正文就照常保留）。这是产品决定不是 bug——若哪天要监控"无正文官宣视频"，把这段判断改掉并重新基线。
+17. **X 长文（note tweet）的全文不在 `full_text` 里**：超过约 280 字的长帖，`legacy.full_text` 只是截断的展示版，完整正文在 `note_tweet.note_tweet_results.result.text`。只读 `full_text` 会静默丢内容——实测 Gemini 4 Argon 定价公告的后半段（$2/$10 每百万 token）就只在 note 里。脚本已优先取 note 全文。
+18. **X 文章（Article）的正文也不在本接口里**：长文帖的 `full_text` 只剩一条指向 `x.com/i/article/…` 的短链，全文取不到（文章页对外 404、`withArticlePlainText` 开关无效），但推文自带 `article` 对象，有 `title` + `preview_text`——脚本用这两项拼出可判的正文（实测 @GoogleCloudTech 的长文仅凭标题+预览就能定性）。
+19. **RSS 多条条目共用同一链接时，键不能是位置序号**：`parse_feed` 原来键 = 链接，链接冲突就按出现顺序加 `#2 #3 …`，键实际退化成"第几条"。GCP 发布说明流 30 条全指向同一个 URL，每日轮换（新一天插入顶部、最旧一天挤出）时所有条目位置整体偏移——**内容没变却整批报 changed**，实测单轮 30 条 phantom changed + 10 条 phantom added，全是空判噪音。现已改成：链接被多条共用时取 Atom `<id>` / RSS `<guid>` 作键（无 id 则退回标题+日期组合），链接唯一的流行为完全不变。**给新源配 RSS 时，先看看它的条目是不是共用一个链接。**
 
 ## 可移植性
 

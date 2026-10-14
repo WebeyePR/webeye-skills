@@ -51,6 +51,9 @@ DEFAULT_WS = os.path.join(os.path.expanduser("~"), ".change-watch")
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
+# 整条正文只剩一个 t.co 短链时的识别（X 的纯媒体帖 / X 文章都是这个形态）。
+_TCO_ONLY_RE = re.compile(r"^https?://t\.co/\S+$")
+
 # CookieJar **不是线程安全的**，并发采集时多线程共享一个 jar 会互相踩（cookie 覆盖 /
 # 迭代中修改）。所以每个线程各持一份 opener：cookie 只在自己这条请求链里流转，既能
 # 解决 ai.google.dev 的 302 循环，又天然无竞争。并发度见 COLLECT_* 常量。
@@ -199,10 +202,27 @@ def _link_of(block):
 
 
 def parse_feed(body):
-    """返回 [(key, record)]，key = 归一化链接。"""
+    """返回 [(key, record)]，key = 归一化链接；链接被多条共用时改用条目稳定 id。
+
+    为什么不能只用链接：有的流多条条目共用同一个链接——GCP 发布说明流
+    （cloud.google.com/feeds/gcp-release-notes.xml）30 条 entry 全部指向
+    docs.cloud.google.com/release-notes。链接冲突时若按出现顺序加 #2 #3… 后缀，
+    键实际退化成"位置序号"：流每日轮换（新一天插入顶部、最旧一天被挤出）时
+    所有条目位置整体偏移，内容没变却整批报 changed——实测单轮 30 条 phantom
+    changed + 10 条 phantom added，全是要 AI 空判的噪音。改用 Atom <id> /
+    RSS <guid> 后键随条目本身稳定：轮换只体现为新条目 added 与旧条目滚出
+    （windowed 源由 split_rolled_out 接住）。**链接唯一的流行为完全不变**，
+    既有基线不受影响（12 个博客流逐个验证过键不变）。
+    """
+    blocks = re.findall(r"<(item|entry)\b[^>]*>(.*?)</\1>", body, re.S | re.I)
+    link_use = {}
+    for _tag, block in blocks:
+        link = norm_url(_link_of(block))
+        if link:
+            link_use[link] = link_use.get(link, 0) + 1
     out = []
     seen = {}
-    for _tag, block in re.findall(r"<(item|entry)\b[^>]*>(.*?)</\1>", body, re.S | re.I):
+    for _tag, block in blocks:
         link = norm_url(_link_of(block))
         title = norm(strip_tags(_tag_text(block, "title")))
         date = norm(_tag_text(block, "pubDate", "published", "updated", "dc:date"))
@@ -210,7 +230,14 @@ def parse_feed(body):
                                                   "content:encoded", "content")))[:1200]
         if not link and not title:
             continue
-        key = link or ("title:" + sha1(title))
+        if link and link_use.get(link, 0) > 1:
+            # 链接被多条共用：必须换一个随条目走的稳定标识，否则键=位置序号
+            stable = norm(_tag_text(block, "id", "guid"))
+            key = stable or ("title:" + sha1(title + "\n" + date))
+        elif link:
+            key = link
+        else:
+            key = "title:" + sha1(title)
         n = seen.get(key, 0)
         seen[key] = n + 1
         if n:
@@ -506,6 +533,18 @@ def parse_x_timeline(data, screen_name, skip_retweets=True):
     条目同时出现在两种容器里：TimelineTimelineItem（单推）与
     TimelineTimelineModule（会话线程，推文嵌在 content.items[] 里）。
     拿不到任何推文时显式报错（防把接口故障误判成"全部推文消失"）。
+
+    三类特殊推文（均为 2026-10-14 实测过的真实案例）：
+    1. **长文（note tweet）**：`legacy.full_text` 只是截断的展示版（约 280 字），
+       完整正文在 `note_tweet.note_tweet_results.result.text` 里。不读它会静默丢
+       内容——实测 Gemini 4 Argon 定价公告的后半段（$2/$10 每百万 token）
+       就只在 note 里，full_text 到 "Argon will launch" 就被砍断。
+    2. **X 文章（article）**：正文只剩一条指向 `x.com/i/article/…` 的短链，
+       全文不在本接口内，但推文自带 `article` 对象，有 `title` + `preview_text`，
+       足够判断（实测 @GoogleCloudTech 的长文仅凭这两项就能定性）。
+    3. **纯媒体帖（视频/图片）**：正文也只剩一条短链，但解析后指向本条推文
+       自己的媒体附件，没有任何可读文本。按用户约定**直接忽略**：不进基线、
+       不产生变更、不占判断配额（曾每天制造 3 条"待确认"噪音）。
     """
     tweets = []
     try:
@@ -525,17 +564,40 @@ def parse_x_timeline(data, screen_name, skip_retweets=True):
             for ic in slots:
                 res = ic.get("tweet_results", {}).get("result", {})
                 if res.get("__typename") == "TweetWithVisibilityResults":
-                    legacy = res.get("tweet", {}).get("legacy")
-                else:
-                    legacy = res.get("legacy")
+                    res = res.get("tweet", {})
+                legacy = res.get("legacy")
                 if legacy:
-                    tweets.append(legacy)
+                    tweets.append((legacy, res))
     if not tweets:
         raise ValueError("时间线 0 条推文（guest 通道被拦或账号异常），拒绝当真")
     import email.utils
     out = []
-    for lg in tweets:
+    for lg, res in tweets:
         text = norm(lg.get("full_text") or "")
+        # 1) 长文：完整正文以 note_tweet 为准（legacy.full_text 是截断版）
+        note = (res.get("note_tweet", {}).get("note_tweet_results", {})
+                    .get("result", {}) or {})
+        note_text = norm(note.get("text") or "")
+        if note_text:
+            text = note_text
+        # 2) 正文只剩一条短链：X 文章 / 纯媒体帖
+        if _TCO_ONLY_RE.match(text.strip()):
+            ents = lg.get("entities", {}) or {}
+            media = ents.get("media", []) or []
+            urls = ents.get("urls", []) or []
+            article_url = next(
+                (u.get("expanded_url") for u in urls
+                 if "x.com/i/article/" in (u.get("expanded_url") or "")), "")
+            if media and not article_url:
+                continue                    # 纯媒体帖：无可读正文，按约定忽略
+            art = (res.get("article", {}).get("article_results", {})
+                       .get("result", {}) or {})
+            art_title = norm(art.get("title") or "")
+            if art_title:
+                art_prev = norm(art.get("preview_text") or "")
+                text = art_title + (("\n\n" + art_prev) if art_prev else "")
+                if article_url:
+                    text += "\n" + article_url
         if not text:
             continue
         if skip_retweets and text.startswith("RT @"):
