@@ -12,15 +12,15 @@
 
 ## 支持的目标
 
-当前内置 **1 个目标 · 18 个信源**：
+当前内置 **1 个目标 · 26 个信源**：
 
 **Google 产品与模型**（`google`）
 
 | 类型 | 数量 | 内容（点击跳转源地址） |
 |---|---|---|
-| 观测流 · RSS | 12 | [Google 全站](https://blog.google/rss/) · [AI](https://blog.google/technology/ai/rss/) · [Gemini](https://blog.google/products/gemini/rss/) · [开发者博客](https://blog.google/technology/developers/rss/) · [Google Cloud](https://blog.google/products/google-cloud/rss/) · [DeepMind](https://deepmind.google/blog/rss.xml) · [Research](https://research.google/blog/rss/) · [开源博客](https://opensource.googleblog.com/feeds/posts/default) · [Android](https://android-developers.googleblog.com/feeds/posts/default) · [Workspace](https://workspaceupdates.googleblog.com/feeds/posts/default) · [Chrome](https://developer.chrome.com/blog/feed.xml) · [Press Corner](https://www.googlecloudpresscorner.com/press-releases?pagetemplate=rss) |
-| 观测流 · LinkedIn | 1 | [Google Cloud 官方页](https://www.linkedin.com/showcase/google-cloud/)（免登录 JSON-LD，含全文 + 时间） |
-| 观测流 · X | 1 | [@Google](https://x.com/Google)（免登录 guest 通道，含全文 + 链接） |
+| 观测流 · RSS | 13 | [Google 全站](https://blog.google/rss/) · [AI](https://blog.google/technology/ai/rss/) · [Gemini](https://blog.google/products/gemini/rss/) · [开发者博客](https://developers.googleblog.com/feeds/posts/default) · [GCP Release Notes](https://cloud.google.com/feeds/gcp-release-notes.xml) · [Google Cloud](https://blog.google/products/google-cloud/rss/) · [DeepMind](https://deepmind.google/blog/rss.xml) · [Research](https://research.google/blog/rss/) · [开源博客](https://opensource.googleblog.com/feeds/posts/default) · [Android](https://android-developers.googleblog.com/feeds/posts/default) · [Workspace](https://workspaceupdates.googleblog.com/feeds/posts/default) · [Chrome](https://developer.chrome.com/blog/feed.xml) · [Press Corner](https://www.googlecloudpresscorner.com/press-releases?pagetemplate=rss) |
+| 观测流 · LinkedIn | 3 | [Google Cloud 官方页](https://www.linkedin.com/showcase/google-cloud/) · [Google DeepMind](https://www.linkedin.com/company/googledeepmind/) · [Google](https://www.linkedin.com/company/google/)（免登录 JSON-LD，含全文 + 时间） |
+| 观测流 · X | 6 | [@Google](https://x.com/Google) · [@GoogleAI](https://x.com/GoogleAI) · [@GoogleDeepMind](https://x.com/GoogleDeepMind) · [@GoogleAIStudio](https://x.com/GoogleAIStudio) · [@googledevs](https://x.com/googledevs) · [@GoogleCloudTech](https://x.com/GoogleCloudTech)（免登录 guest 通道，含全文 + 链接） |
 | 对象登记册 · 网页表格 | 4 | [Gemini API 模型清单](https://ai.google.dev/gemini-api/docs/models) · [Gemini API 弃用清单](https://ai.google.dev/gemini-api/docs/deprecations) · [Vertex AI 模型版本](https://cloud.google.com/vertex-ai/generative-ai/docs/learn/model-versions) · [Vertex AI 弃用清单](https://cloud.google.com/vertex-ai/generative-ai/docs/deprecations) |
 
 > 加目标或信源：编辑 `config/targets.json`（首次运行复制到工作区），**改配置不碰代码**。
@@ -94,7 +94,7 @@ python3 scripts/query.py --object gemini --stats
 ### 方案 B：纯命令行兜底（只抓取，适合服务器 / 无 AI 环境）
 
 ```cron
-# 每 30 分钟抓取+差分（轻量，约 18 个 HTTP 请求）
+# 每 30 分钟抓取+差分（轻量，约 26 个 HTTP 请求，并发约 12 秒）
 */30 * * * * cd <技能目录> && python3 scripts/watch.py >> ~/.change-watch/log/runs.log 2>&1
 ```
 
