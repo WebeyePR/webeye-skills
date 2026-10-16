@@ -6,13 +6,29 @@
     "_comment_stale": "全局停更阈值（小时）：某源最新条目距今超过它即在报告里标 stale。单个源可用同名字段覆盖；写 null 表示该源不检查停更。",
     "request_timeout_seconds": 30,
     "request_retries": 1,
-    "min_changes_to_notify": 1
+    "min_changes_to_notify": 1,
+    "collect_concurrency": 6,
+    "host_concurrency": 2,
+    "collect_wall_clock_seconds": 300,
+    "_comment_concurrency": "并发采集（v20261014）：collect_concurrency=全局线程数；host_concurrency=同一域名最多几个并发（blog.google 有 4 个源，不限流容易被当爬虫）；collect_wall_clock_seconds=整轮壁钟上限，超时未返回的源判失败并继续出结果，防止单个慢源拖死定时任务。排查问题时把 collect_concurrency 设为 1 即退回串行。"
   },
   "notify": {
     "user_id": "",
     "chat_id": "REPLACE_WITH_YOUR_GROUP_CHAT_ID",
     "mention": "all",
     "_comment": "推送目标：user_id=私信给谁（飞书 openId，空=不发私信）；chat_id=额外发到的群（空/占位符=不发群）。两者都留空则完全不推送（仅落盘 out/notify-unsent-*.md）。交互运行 `python3 scripts/watch.py --init` 会自动按「群名 / 自己」查询飞书 ID 并写入这里，无需手动粘贴；也可手动填。@all 需群主在群设置开启「@所有人」权限，否则把 mention 改成具体 [open_id, ...]。"
+  },
+  "digest": {
+    "enabled": true,
+    "send_window": "08:30",
+    "mode": "delta",
+    "seed_hours": 24,
+    "include_low": true,
+    "_comment": "每日变更摘要：默认开启。send_window 仅作提示（调度由宿主自动化控制，建议每天 08:30 跑一次）；include_low=false 时摘要剔除次要变更（不计入条数与统计，锚点仍推进过它们，避免下轮重复覆盖）。有无变更都正常发（间隔够长，不作心跳）。mode=delta（默认）锚定上次已交付摘要，窗口=(上次锚点,本次运行]，多日间隔自动吸收、首尾相接不重不漏，消除自然日零点的 ~15.5h 盲区；mode=day 为旧行为可回退。delta 下 --digest 只产卡+写 pending，须发送 ok 后跑 --digest --commit 推进锚点（宁重勿漏）。seed_hours 为首跑(无锚点)回溯时长。"
+  },
+  "heartbeat": {
+    "min_hours": 12,
+    "_comment": "每小时巡检的心跳节流：距上次心跳 >= 12h 才发一次『巡检心跳』存活确认（发本人私信），避免频繁通知抵消去噪声。频繁检测需要心跳证明存活，但必须节流（>=12h、可上调到一天）。"
   },
   "targets": [
     {
@@ -25,13 +41,15 @@
           "id": "blog-google-all",
           "label": "Google 官方博客 · 全站",
           "kind": "rss",
-          "url": "https://blog.google/rss/"
+          "url": "https://blog.google/rss/",
+          "windowed": true
         },
         {
           "id": "blog-google-ai",
           "label": "Google 官方博客 · AI",
           "kind": "rss",
-          "url": "https://blog.google/technology/ai/rss/"
+          "url": "https://blog.google/technology/ai/rss/",
+          "windowed": true
         },
         {
           "id": "blog-google-gemini",
@@ -39,37 +57,53 @@
           "kind": "rss",
           "url": "https://blog.google/products/gemini/rss/",
           "stale_after_hours": 336,
-          "notes": "周更节奏：实测最新条目约 168h，正好压在默认 7 天阈值两侧，会来回跳变，故放宽到 14 天。"
+          "notes": "周更节奏：实测最新条目约 168h，正好压在默认 7 天阈值两侧，会来回跳变，故放宽到 14 天。",
+          "windowed": true
         },
         {
-          "id": "blog-google-developers",
-          "label": "Google 官方博客 · 开发者",
+          "id": "devblog-google",
+          "label": "Google 开发者博客（engineering blog）",
           "kind": "rss",
-          "url": "https://blog.google/technology/developers/rss/"
+          "url": "https://developers.googleblog.com/feeds/posts/default",
+          "notes": "官方工程博客，AI/开发者公告主渠道。替换原 blog.google/technology/developers（该源混入 Research Engineer 招聘帖且为子集，已弃用）。",
+          "windowed": true
+        },
+        {
+          "id": "gcp-release-notes",
+          "label": "Google Cloud 发布说明（GCP Release Notes）",
+          "kind": "rss",
+          "url": "https://cloud.google.com/feeds/gcp-release-notes.xml",
+          "stale_after_hours": 168,
+          "notes": "Cloud 产品变更面（新功能/弃用/GA），每日更新，补博客与 Vertex 登记册之间的结构化间隙。",
+          "windowed": true
         },
         {
           "id": "blog-google-cloud",
           "label": "Google 官方博客 · Google Cloud",
           "kind": "rss",
-          "url": "https://blog.google/products/google-cloud/rss/"
+          "url": "https://blog.google/products/google-cloud/rss/",
+          "windowed": true
         },
         {
           "id": "deepmind-blog",
           "label": "Google DeepMind 博客",
           "kind": "rss",
-          "url": "https://deepmind.google/blog/rss.xml"
+          "url": "https://deepmind.google/blog/rss.xml",
+          "windowed": true
         },
         {
           "id": "research-blog",
           "label": "Google Research 博客",
           "kind": "rss",
-          "url": "https://research.google/blog/rss/"
+          "url": "https://research.google/blog/rss/",
+          "windowed": true
         },
         {
           "id": "opensource-blog",
           "label": "Google 开源博客",
           "kind": "rss",
-          "url": "https://opensource.googleblog.com/feeds/posts/default"
+          "url": "https://opensource.googleblog.com/feeds/posts/default",
+          "windowed": true
         },
         {
           "id": "android-dev-blog",
@@ -77,26 +111,30 @@
           "kind": "rss",
           "url": "https://android-developers.googleblog.com/feeds/posts/default",
           "stale_after_hours": 336,
-          "notes": "周更节奏：实测最新条目约 167h，同样压在边界上，放宽到 14 天以避免误报。"
+          "notes": "周更节奏：实测最新条目约 167h，同样压在边界上，放宽到 14 天以避免误报。",
+          "windowed": true
         },
         {
           "id": "workspace-updates",
           "label": "Google Workspace 更新",
           "kind": "rss",
-          "url": "https://workspaceupdates.googleblog.com/feeds/posts/default"
+          "url": "https://workspaceupdates.googleblog.com/feeds/posts/default",
+          "windowed": true
         },
         {
           "id": "chrome-blog",
           "label": "Chrome 开发者博客",
           "kind": "rss",
           "url": "https://developer.chrome.com/blog/feed.xml",
-          "notes": "对照样本：实测停更约 109 天，属信源侧真实静默，保留默认 7 天阈值以持续告警。"
+          "notes": "对照样本：实测停更约 109 天，属信源侧真实静默，保留默认 7 天阈值以持续告警。",
+          "windowed": true
         },
         {
           "id": "gcp-press-corner",
           "label": "Google Cloud 新闻稿（Press Corner）",
           "kind": "rss",
-          "url": "https://www.googlecloudpresscorner.com/press-releases?pagetemplate=rss"
+          "url": "https://www.googlecloudpresscorner.com/press-releases?pagetemplate=rss",
+          "windowed": true
         },
         {
           "id": "linkedin-google-cloud",
@@ -104,14 +142,88 @@
           "kind": "json_ld_posts",
           "url": "https://www.linkedin.com/showcase/google-cloud/",
           "timeout_seconds": 60,
-          "notes": "免登录可用：页面内嵌 schema.org JSON-LD（SocialMediaPosting，含全文+ISO时间）。页面加载慢，超时放宽到 60s。被 authwall 拦截时脚本会显式报错，不会误报帖子消失。"
+          "notes": "免登录可用：页面内嵌 schema.org JSON-LD（SocialMediaPosting，含全文+ISO时间）。页面加载慢，超时放宽到 60s。被 authwall 拦截时脚本会显式报错，不会误报帖子消失。",
+          "windowed": true,
+          "stale_after_hours": 336
+        },
+        {
+          "id": "linkedin-googledeepmind",
+          "label": "LinkedIn · Google DeepMind 官方公司页",
+          "kind": "json_ld_posts",
+          "url": "https://www.linkedin.com/company/googledeepmind/",
+          "timeout_seconds": 60,
+          "windowed": true,
+          "notes": "实测 JSON-LD @graph 内 4 条帖子（最新 2026-10-07），含 author/datePublished/全文。company 页偶发 authwall，脚本显式报错不误报消失；页面慢，超时 60s。",
+          "stale_after_hours": 336
+        },
+        {
+          "id": "linkedin-google",
+          "label": "LinkedIn · Google 主公司页",
+          "kind": "json_ld_posts",
+          "url": "https://www.linkedin.com/company/google/",
+          "timeout_seconds": 60,
+          "windowed": true,
+          "notes": "实测 JSON-LD @graph 内 7 条帖子（最新 2026-10-12），主公司页官宣。company 页偶发 authwall，脚本显式报错不误报消失；页面慢，超时 60s。",
+          "stale_after_hours": 336
         },
         {
           "id": "x-google",
           "label": "X @Google（guest 免登录通道）",
           "kind": "x_timeline",
           "url": "https://x.com/Google",
-          "timeout_seconds": 30
+          "timeout_seconds": 30,
+          "windowed": true,
+          "stale_after_hours": 336
+        },
+        {
+          "id": "x-googleai",
+          "label": "X @GoogleAI（guest 免登录通道）",
+          "kind": "x_timeline",
+          "url": "https://x.com/GoogleAI",
+          "timeout_seconds": 30,
+          "windowed": true,
+          "notes": "AI 综合/模型官宣主力（247 万粉），覆盖 Gemini/NanoBanana 等；与 @GoogleAIStudio 互补。",
+          "stale_after_hours": 336
+        },
+        {
+          "id": "x-googledeepmind",
+          "label": "X @GoogleDeepMind（guest 免登录通道）",
+          "kind": "x_timeline",
+          "url": "https://x.com/GoogleDeepMind",
+          "timeout_seconds": 30,
+          "windowed": true,
+          "notes": "模型/研究官宣；与 deepmind-blog RSS + LinkedIn DeepMind 页互补（社交前置、博客滞后）。",
+          "stale_after_hours": 336
+        },
+        {
+          "id": "x-googleaistudio",
+          "label": "X @GoogleAIStudio（guest 免登录通道）",
+          "kind": "x_timeline",
+          "url": "https://x.com/GoogleAIStudio",
+          "timeout_seconds": 30,
+          "windowed": true,
+          "notes": "开发者向模型/API 官宣（NanoBanana 2.1、Gemini 3.8 Live 等在此首发）。",
+          "stale_after_hours": 336
+        },
+        {
+          "id": "x-googledevs",
+          "label": "X @googledevs（guest 免登录通道）",
+          "kind": "x_timeline",
+          "url": "https://x.com/googledevs",
+          "timeout_seconds": 30,
+          "windowed": true,
+          "notes": "开发者产品/工具官宣（258 万粉）。",
+          "stale_after_hours": 336
+        },
+        {
+          "id": "x-googlecloudtech",
+          "label": "X @GoogleCloudTech（guest 免登录通道）",
+          "kind": "x_timeline",
+          "url": "https://x.com/GoogleCloudTech",
+          "timeout_seconds": 30,
+          "windowed": true,
+          "notes": "Cloud 产品/技术官宣（131 万粉）；与 LinkedIn Cloud 页、GCP Release Notes 互补。",
+          "stale_after_hours": 336
         }
       ],
       "registries": [
