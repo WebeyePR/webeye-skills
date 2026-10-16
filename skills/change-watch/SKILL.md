@@ -2,7 +2,7 @@
 name: change-watch
 description: 监控指定目标（公司/产品线/模型）的变更并沉淀为可查询的变更流水。适用于：想知道某公司最近发布了什么/下架了什么/改了什么价；要给某个产品线做持续变更监控并定时通知；要按时间线、类型、对象查看与检索历史变更并溯源到原文；需要"先分析判断再通知"，而不是把原文直接转发。触发场景举例："Google 最近有什么更新"、"盯着 Gemini 的模型上下架"、"这类变更定时推给我"、"上次那个模型的变更记录在哪"。
 description_en: Monitor changes of a target (company / product line / model) and accumulate them into a queryable change ledger. Use when you want to know what a company recently released / discontinued / repriced; run continuous change monitoring for a product line with scheduled notifications; retrieve and trace historical changes by timeline, type, or object back to the source; and "analyze-then-notify" rather than forwarding raw text. Trigger examples: "What's new from Google", "Watch Gemini's model additions/removals", "Push these changes to me on a schedule", "Where's the change record for that model".
-version: v20261016
+version: v20261016.1
 license: MIT
 agent_created: true
 ---
@@ -187,11 +187,12 @@ python3 <技能目录>/scripts/log_change.py --input judged.json
 `*-group.json` 并发群 @。`mention` 取值 `all`（@所有人，需群主在群设置开「@所有人」权限）
 或 `[open_id, ...]`（@ 指定人）。群 `chat_id` 用 `lark-cli im +chat-search --query 群名` 查。
 
-**通知纪律（双通道 + 三刀）**：本技能把"通知"拆成两条相互独立的通道，互不干扰：
+**通知纪律（多通道 + 三刀）**：本技能把"通知"拆成几条相互独立的发声通道，互不干扰：
 
 1. **变更通知（实时 · 全级别）**：`log_change.py` 落盘时，凡 `notify:true` 的条目**当场发**（按目标分别发卡）。`high`/`normal`/`low` 默认都通知（实时性：变更不拖延，摘要与变更分开、变更全级别正常发）；`unknown` 强制不通知；AI 显式写 `notify:false` 才抑制。级别只影响卡片样式（红头 / @），不影响"发不发"。
 2. **每日变更摘要（默认开启 · 增强项）**：`python3 scripts/log_change.py --digest` 聚合**自上次已交付摘要以来**新入账的变更（delta 模式：窗口 = (上次锚点, 本次运行]，按严重度 / 目标 / 类型统计），并附当前不可用源，单卡回顾；有无变更都发（间隔够长，不作心跳）。默认每天 **08:30** 由宿主自动化跑一次（配置见 `targets.json` 的 `digest` 块：`enabled` 默认 `true`、`mode` 默认 `delta`（`day` 可回退旧自然日行为）、`seed_hours` 首跑无锚点时的回溯时长、`include_low` 控制是否含次要变更）。delta 下 `--digest` **只产卡 + 写 pending，不推进锚点**，须发送成功后再跑 `--digest --commit`（宁重勿漏：发送失败不 commit，下次自动重覆盖）。**发给谁（本人私信 / 群）由自动化提示词决定——脚本只产出 `out/card-digest-<stamp>.json`，不负责发送。**
 3. **源健康一次性告警**：`python3 scripts/log_change.py --health` 只对**源健康跃迁**发一次——`ok→down`（不可用）与 `→ok`（已恢复）各一次；持续失联（稳定态无跃迁）**静音**，不会每轮刷屏；`flapping` 等中间态不告警。去重靠 `state/health_alerts.json`，对同一份 `latest.json` 重复跑也不会重发。
+4. **巡检心跳（节流存活确认）**：`python3 scripts/log_change.py --heartbeat` 在巡检空跑（本轮无变更）时证明监控存活——频繁检测不能静默到让人怀疑它挂了，但也不能每轮刷屏。按 `state/last_heartbeat.json` 节流：默认距上次 **≥12h** 才发一次「巡检心跳」卡（`heartbeat.min_hours` 可覆盖，下限 1h），未到期脚本自己静默、不产卡。心跳卡由自动化路由到**本人私信**（不进群）。与每日摘要的分工：摘要是"日级汇总、有无变更都发"，心跳是"空跑期的存活可见性、阈值内至多一次"。
 
 三刀（防打扰，不是防通知）：**不重复发**（变更按 `change_id` 幂等去重；健康告警按跃迁去重，同一持续故障只响一次）、**空跑别发**（0 条可通知变更 → 完全静默，连状态卡都不发）、**噪声别发**（只有判为「非真变更」`discard` 才不进流水；`low` 是真·小变更，照常通知，`low`≠噪声）。
 

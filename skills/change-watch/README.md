@@ -129,6 +129,10 @@ python3 scripts/query.py --object gemini --stats
 - 新增 `scripts/sync_template.py`：改完 live 一键同步模板（notify 块自动换占位符；写出前全量扫描 `oc_`/`ou_`/`cli_ 形态真实 ID，命中即拒绝写出）；`--check` 只比对不写，供 CI/巡检。
 - 修复的隐患：旧方案里 assume-unchanged 是粗粒度屏蔽，曾连带把模板的正常更新挡在库外（仓库模板一度停更在 18 源），且 `git add -f` 对该标记无效、必须 `update-index --no-assume-unchanged` 才能提交——这条麻烦流程从此不再需要。
 
+### v20261016.1 · 2026-10-16
+
+- **【文档】SKILL.md 补「巡检心跳」通道说明**：`log_change.py --heartbeat`（v20261011.2 上线，README 与每小时巡检自动化提示词均在用）此前只存在于 README changelog，SKILL.md「通知纪律」漏列该通道，且「双通道」表述与实际通道数不符。本次将心跳补为第 4 条发声通道（节流规则、发本人私信不进群、与每日摘要的分工），标题改为「多通道 + 三刀」。纯文档对齐，无行为变更。
+
 ### v20261014.2 · 2026-10-14（午间）
 
 判定准则补「跨轮同事件」指引：同一事件被多个源在不同轮次采集到时（实测：新加坡端侧诈骗检测，
