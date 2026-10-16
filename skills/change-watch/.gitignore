@@ -9,5 +9,10 @@ out/
 log/
 state/
 
+# Live 配置含真实推送 ID（群 chat_id / 个人 openId），永不入库。
+# 仓库只保留脱敏模板 config/targets.json.example（首跑由 watch.py 复制到工作区）；
+# 改完 live 后用 scripts/sync_template.py 同步模板，无需任何 git 标记操作。
+/config/targets.json
+
 # Mac OS
 .DS_Store

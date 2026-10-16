@@ -45,7 +45,9 @@ except ImportError:       # pragma: no cover - 平台差异
     fcntl = None
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_CONFIG = os.path.join(SKILL_DIR, "config", "targets.json")
+# 仓库里只放脱敏模板 targets.json.example；config/targets.json 已被 .gitignore 永久排除
+# （live 配置含真实群 ID 与个人 openId，永不入库）。首跑时把示例复制进工作区。
+DEFAULT_CONFIG = os.path.join(SKILL_DIR, "config", "targets.json.example")
 DEFAULT_WS = os.path.join(os.path.expanduser("~"), ".change-watch")
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "

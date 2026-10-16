@@ -23,7 +23,7 @@
 | 观测流 · X | 6 | [@Google](https://x.com/Google) · [@GoogleAI](https://x.com/GoogleAI) · [@GoogleDeepMind](https://x.com/GoogleDeepMind) · [@GoogleAIStudio](https://x.com/GoogleAIStudio) · [@googledevs](https://x.com/googledevs) · [@GoogleCloudTech](https://x.com/GoogleCloudTech)（免登录 guest 通道，含全文 + 链接） |
 | 对象登记册 · 网页表格 | 4 | [Gemini API 模型清单](https://ai.google.dev/gemini-api/docs/models) · [Gemini API 弃用清单](https://ai.google.dev/gemini-api/docs/deprecations) · [Vertex AI 模型版本](https://cloud.google.com/vertex-ai/generative-ai/docs/learn/model-versions) · [Vertex AI 弃用清单](https://cloud.google.com/vertex-ai/generative-ai/docs/deprecations) |
 
-> 加目标或信源：编辑 `config/targets.json`（首次运行复制到工作区），**改配置不碰代码**。
+> 加目标或信源：编辑 `config/targets.json.example`（首次运行复制到工作区），**改配置不碰代码**。
 
 ## 渠道（通知怎么发）
 
@@ -111,7 +111,7 @@ python3 scripts/query.py --object gemini --stats
 
 ## 资源
 
-- [`config/targets.json`](config/targets.json) —— 目标 / 信源配置
+- [`config/targets.json.example`](config/targets.json.example) —— 脱敏配置模板（首次运行复制到工作区；含真实推送 ID 的 `config/targets.json` 被 `.gitignore` 永久排除）
 - [`references/criteria.md`](references/criteria.md) —— 判断准则（改口味改这里）
 - [`references/notify-card.md`](references/notify-card.md) —— 卡片模板与发送降级链
 - [`scripts/watch.py`](scripts/watch.py) —— 抓取 + 差分
@@ -121,6 +121,13 @@ python3 scripts/query.py --object gemini --stats
 ## 版本更新（Changelog）
 
 技能采用 **date-stamp 版本号**（`vYYYYMMDD` 当日首版，同日修复追加 `.N`）。
+
+### v20261016 · 2026-10-16
+
+配置模板改为 **`targets.json.example` + `.gitignore`** 方案，废弃 assume-unchanged 标记：
+- 仓库只收脱敏模板 `config/targets.json.example`（首跑由 `watch.py` 复制进工作区）；`config/targets.json` 进 `.gitignore` 永久排除——live 里的真实群 ID / 个人 openId 结构上不可能被误提交，且保护随仓库走（clone 即生效），不再依赖每台机器本地的 git 标记。
+- 新增 `scripts/sync_template.py`：改完 live 一键同步模板（notify 块自动换占位符；写出前全量扫描 `oc_`/`ou_`/`cli_ 形态真实 ID，命中即拒绝写出）；`--check` 只比对不写，供 CI/巡检。
+- 修复的隐患：旧方案里 assume-unchanged 是粗粒度屏蔽，曾连带把模板的正常更新挡在库外（仓库模板一度停更在 18 源），且 `git add -f` 对该标记无效、必须 `update-index --no-assume-unchanged` 才能提交——这条麻烦流程从此不再需要。
 
 ### v20261014.2 · 2026-10-14（午间）
 

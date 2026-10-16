@@ -2,7 +2,7 @@
 name: change-watch
 description: 监控指定目标（公司/产品线/模型）的变更并沉淀为可查询的变更流水。适用于：想知道某公司最近发布了什么/下架了什么/改了什么价；要给某个产品线做持续变更监控并定时通知；要按时间线、类型、对象查看与检索历史变更并溯源到原文；需要"先分析判断再通知"，而不是把原文直接转发。触发场景举例："Google 最近有什么更新"、"盯着 Gemini 的模型上下架"、"这类变更定时推给我"、"上次那个模型的变更记录在哪"。
 description_en: Monitor changes of a target (company / product line / model) and accumulate them into a queryable change ledger. Use when you want to know what a company recently released / discontinued / repriced; run continuous change monitoring for a product line with scheduled notifications; retrieve and trace historical changes by timeline, type, or object back to the source; and "analyze-then-notify" rather than forwarding raw text. Trigger examples: "What's new from Google", "Watch Gemini's model additions/removals", "Push these changes to me on a schedule", "Where's the change record for that model".
-version: v20261014.2
+version: v20261016
 license: MIT
 agent_created: true
 ---
@@ -52,7 +52,9 @@ python3 <技能目录>/scripts/watch.py --init --non-interactive   # CI / 自动
 
 默认工作区 `~/.change-watch/`。用户要换位置就加 `--workspace <目录>`；**要用多个 AI 工具共享同一份沉淀，就让它们指到同一个目录**（例如放在同步盘里）。
 
-首次运行会自动把 `config/targets.json` 复制成 `<工作区>/targets.json`。**此后改工作区那份**（增删目标/信源不用改代码）。
+首次运行会自动把 `config/targets.json.example`（脱敏模板）复制成 `<工作区>/targets.json`。**此后改工作区那份**（增删目标/信源不用改代码）。
+
+> **模板与 live 的关系**：仓库只收脱敏模板 `config/targets.json.example`；`config/targets.json` 已被 `.gitignore` 永久排除——live 配置里的真实推送 ID（群 `chat_id`、个人 `openId`）永不入库，也不再需要 assume-unchanged 之类的本地标记（那种标记是粗粒度屏蔽，会连带挡住模板的正常更新）。改完 live 后跑 `python3 scripts/sync_template.py` 即可把新增的源/设置同步进模板（脚本自带真实 ID 泄漏扫描，命中即拒绝写出）。
 
 工作区里有什么：
 
@@ -308,9 +310,10 @@ python3 <技能目录>/scripts/log_change.py --show         # 最近 20 条
 
 ## 资源
 
-- `config/targets.json` —— 目标 / 观测流 / 对象登记册配置（首次运行复制到工作区）
+- `config/targets.json.example` —— 脱敏配置模板（首次运行复制到工作区；`config/targets.json` 被 `.gitignore` 排除，防真实推送 ID 入库；`scripts/sync_template.py` 负责把 live 变更同步进模板）
 - `references/criteria.md` —— **判断准则**（改判断口味改这里）
 - `references/notify-card.md` —— **通知卡片模板与发送降级链**（清晰 / 精炼 / 可溯源的卡片结构）
 - `scripts/watch.py` —— 抓取 + 差分，产出 `out/latest.json`
 - `scripts/log_change.py` —— 记录判断结果、去重、生成通知草稿与**可直接发送的飞书卡片 JSON**
 - `scripts/query.py` —— 时间线 / 按类型 / 按对象 / 检索 / 统计
+- `scripts/sync_template.py` —— 把 live 配置同步为脱敏模板 `config/targets.json.example`（改完 live 跑一次；notify 块自动换占位符，写出前扫描真实 ID，命中即拒绝写出）
