@@ -9,7 +9,7 @@ description: >-
   潜在客户与业务情报），确认线索对接「猎隼线索池」多维表格（预设待权限校准）。适用于："最近八行业
   有什么动态"、"帮我盯种子到B轮刚融资的出海公司"、"这类线索定时推给我"。触发举例："市场情报简报"、
   "发现了哪些潜在客户"、"把某公司加入监控"。
-version: 0.2.2
+version: 0.2.4
 author: Webeye CSBU Team
 license: MIT
 alwaysActive: false
@@ -55,7 +55,7 @@ AIHOT 的词表与 tier 概念。**字段与结构能继承的一律继承，不
 | `sources.json` | 公共源登记册（两个需求共用，`serves` 标记 intel/lead） |
 | `entities.json` | 企业与行业词表（entity 归一依据，沿用 AIHOT 词表思路） |
 | `rules.json` | 线索规则（三层模型，改规则不改代码） |
-| `notify.json` | 通知目标（飞书 user_id/chat_id/mention）+ 多维表格预设（二期） |
+| `notify.json` | 通知目标（飞书 user_id/chat_id/mention）+ 猎隼池写入预设（bitable，已实装） |
 | `state/streams/*.json` | 上一轮快照（差分对照物） |
 | `state/health.json` | 源健康三态（ok/flapping/down） |
 | `state/pending.json` | 待判队列：本轮待判断的变更，判完核销 |
@@ -174,11 +174,16 @@ notify.json。
 **卡片直接发送脚本产出的 JSON，不要手拼**；发送降级链见 `references/notify-card.md`
 （飞书连接器 bot 身份 → 本地 lark-cli → 落盘 `notify-unsent-*.md` 并会话内明确提醒）。
 
-### 第 5 步：线索确认闭环（人工）
+### 第 5 步：线索确认与入池闭环（人工）
 
 线索卡确认后把 `log/leads.jsonl` 里对应条目的 `status` 改为 `confirmed` / `rejected`
-（可直接编辑，或让 AI 改）。`rejected` 的记录是规则调优的依据。二期 `notify.json.bitable.enabled=true`
-后，confirmed 线索写入飞书多维表格（字段映射已预设，写入走"预览→确认→写入"断点）。
+（可直接编辑，或让 AI 改）。`rejected` 的记录是规则调优的依据。
+
+确认要跟进的线索入池「猎隼线索池」多维表格——**已实装**，走「定时与自动化」章节的
+四步流程（`--bitable` 预览 → AI 调研补全 → `--bitable --commit` 写入 → `--lead-card`
+重发卡片）。注意 `status`（new/confirmed/rejected，人工确认用）与 `bitable_status`
+（pending/pushed/exists/filtered/failed，脚本回写写入结果用）是两个字段：
+写入由 `--bitable` 驱动、选 `bitable_status=pending` 的线索，**不要求先改 `status`**。
 
 ### 第 6 步：检索（随时）
 
@@ -271,6 +276,10 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
 13. **猎隼线索池字段要抄表内惯例**：技术底座查不到填"未查明"、联系方式填
     "未查询到有效信息"、企业规模/成立年限/城市填"未公开"——不空着、不猜、不造选项；
     各字段定义与调研渠道见 `references/bitable-fields.md`（按 100 条历史记录反推校准）。
+14. **情报卡族视觉差异纪律**：market-intel 情报卡统一**紫色系**（violet 头 +
+    `report_outlined` 图标 + violet-50/100 描边块），与 change-watch 蓝色铃铛监控卡
+    一眼区分（实测 2026-10-23 临时测试群）。语义色共用不改：红=强提醒/P0、
+    绿=正常/P1、黄=异常。改样式必须先发临时测试群实测渲染，再发正式群。
 
 ## 可移植性
 

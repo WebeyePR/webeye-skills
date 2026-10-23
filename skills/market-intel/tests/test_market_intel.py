@@ -635,6 +635,36 @@ class TestGroupMention(unittest.TestCase):
         self.assertIn("<at id=all></at>", s)
 
 
+class TestIntelCardStyle(unittest.TestCase):
+    """视觉差异纪律：情报卡族紫色系（violet 头 + report 图标 + violet 块），
+    与 change-watch 蓝色监控卡区分；改回蓝/丢图标=回归。"""
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+
+    def test_default_template_is_violet(self):
+        card = judge.build_card("市场情报简报", "t", [{"tag": "markdown", "content": "b"}])
+        self.assertEqual(card["header"]["template"], "violet",
+                         "情报卡默认头应为 violet，与 change-watch 的 blue 监控卡区分")
+
+    def test_intel_blocks_are_violet(self):
+        blocks, _ = judge.intel_blocks([{"significance": "normal", "type": "动态",
+                                         "title": "t", "summary": "s", "sources": []}])
+        self.assertTrue(blocks)
+        blk = blocks[0]
+        self.assertEqual(blk["border_color"], "violet-100")
+        self.assertEqual(blk["background_style"], "violet-50")
+
+    def test_intel_card_carries_report_icon(self):
+        card = judge.build_card("市场情报简报", "t", [], template="violet",
+                                icon={**judge.INTEL_ICON, "color": "violet"})
+        self.assertEqual(card["header"]["icon"]["token"], "report_outlined")
+        self.assertEqual(card["header"]["icon"]["color"], "violet")
+        # 语义色不动：群卡强提醒仍为 red 头
+        gcard = judge.build_card("市场情报简报 · 重要", "t", [], template="red")
+        self.assertEqual(gcard["header"]["template"], "red")
+
+
 class TestDigestAnchor(unittest.TestCase):
     """日报锚点：必须同时覆盖 intel 与 leads 的 logged_at，漏 leads 会重复展示已发线索。"""
 

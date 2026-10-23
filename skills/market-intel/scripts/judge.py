@@ -39,7 +39,7 @@ INTEL_KEYS = {"change_id", "type", "significance", "object", "title", "summary",
 NOTIFY_KEYS = {"version", "notify", "digest", "bitable"}
 NOTIFY_BLOCK_KEYS = {"user_id", "chat_id", "mention"}
 
-SIG_LABEL = {"high": ("重要", "red"), "normal": ("常规", "blue"), "low": ("次要", "neutral")}
+SIG_LABEL = {"high": ("重要", "red"), "normal": ("常规", "violet"), "low": ("次要", "neutral")}
 SIG_ORDER = {"high": 0, "normal": 1, "low": 2}
 PRIORITY_LABEL = {"P0": ("P0 · 优先建联", "red"), "P1": ("P1 · 储备", "blue")}
 
@@ -150,6 +150,12 @@ def coverage_check(latest, intel, fact_records):
 
 
 # ---------- 卡片生成（沿用 notify-card.md 的骨架与纪律） ----------
+#
+# 视觉差异纪律：market-intel 通知卡用紫色系（violet 头 + report 图标 + violet 块），
+# 与 change-watch 的蓝色铃铛监控卡一眼区分；语义色不动——红=强提醒/P0、绿=P1/正常、
+# 黄=异常。改样式前先在临时测试群实测渲染，再发正式群。
+
+INTEL_ICON = {"tag": "standard_icon", "token": "report_outlined"}  # 官方图标枚举，实测渲染 ok
 
 CARD_CONFIG = {
     "schema": "2.0",
@@ -161,7 +167,7 @@ CARD_CONFIG = {
 }
 
 
-def _block(md_lines, color="blue", last=False):
+def _block(md_lines, color="violet", last=False):
     els = [m if isinstance(m, dict) else {"tag": "markdown", "content": m} for m in md_lines]
     return {"tag": "interactive_container", "width": "fill", "has_border": True,
             "border_color": color + "-100", "corner_radius": "8px", "background_style": color + "-50",
@@ -170,15 +176,18 @@ def _block(md_lines, color="blue", last=False):
             "elements": els}
 
 
-def build_card(title, subtitle, blocks, template="blue", tags=None):
+def build_card(title, subtitle, blocks, template="violet", tags=None, icon=None):
     header_tags = [{"tag": "text_tag", "text": {"tag": "plain_text", "content": text}, "color": color}
                    for text, color in (tags or [])]
+    header = {"title": {"tag": "plain_text", "content": title},
+              "subtitle": {"tag": "plain_text", "content": subtitle},
+              "template": template,
+              "text_tag_list": header_tags}
+    if icon:  # 缺省不带图标，行为与旧版一致
+        header["icon"] = icon
     return {
         **CARD_CONFIG,
-        "header": {"title": {"tag": "plain_text", "content": title},
-                   "subtitle": {"tag": "plain_text", "content": subtitle},
-                   "template": template,
-                   "text_tag_list": header_tags},
+        "header": header,
         "body": {"direction": "vertical", "padding": "12px 12px 20px 12px", "elements": blocks},
     }
 
@@ -198,7 +207,7 @@ def intel_blocks(records, limit=5):
     ordered = sorted(records, key=lambda r: SIG_ORDER.get(r.get("significance"), 3))
     shown, blocks = ordered[:limit], []
     for r in shown:
-        sig_label, sig_color = SIG_LABEL.get(r.get("significance"), ("常规", "blue"))
+        sig_label, sig_color = SIG_LABEL.get(r.get("significance"), ("常规", "violet"))
         head = "<text_tag color='%s'>%s</text_tag> <text_tag color='neutral'>%s</text_tag> **%s**" % (
             sig_color, sig_label, r.get("type") or "动态", r.get("title") or "")
         blocks.append(_block([head, r.get("summary") or "", _sources_line(r.get("sources") or [])]))
@@ -527,19 +536,19 @@ def cmd_input(ws, input_path):
     cards = []
     if notified_intel:
         blocks, total = intel_blocks(notified_intel)
-        tags = [("%d 条动态" % total, "blue")]
+        tags = [("%d 条动态" % total, "violet")]
         if any(r.get("significance") == "high" for r in notified_intel):
             tags.append(("含重要动态", "red"))
         card = build_card("市场情报简报", core.now_iso().replace("T", " ")[:16] + " · 本轮判定",
                           blocks + [{"tag": "markdown", "text_size": "notation",
                                      "content": "<font color='grey'>明细已归档，可按时间线 / 类型 / 对象检索。</font>"}],
-                          tags=tags)
+                          template="violet", tags=tags, icon={**INTEL_ICON, "color": "violet"})
         cards.append(write_card(ws, "card-intel-%s.json" % stamp(), card))
         if any(r.get("significance") == "high" for r in notified_intel):
             # 群卡：重要动态 @ 提醒（notify.mention 驱动，默认 @所有人）
             gels = ([e] if (e := _mention_lead("⚠️ 含重要动态，请关注", notify_cfg.get("notify"))) else []) + blocks
             gcard = build_card("市场情报简报 · 重要", core.now_iso().replace("T", " ")[:16],
-                               gels, template="red", tags=tags)
+                               gels, template="red", tags=tags, icon={**INTEL_ICON, "color": "red"})
             cards.append(write_card(ws, "card-intel-%s-group.json" % stamp(), gcard))
     if new_leads:
         p0_leads = [l for l in new_leads if l.get("priority") == "P0"]
@@ -716,13 +725,15 @@ def cmd_digest(ws, commit=False):
     if path is None:
         blocks = [_block(["**本时段市场情报 %d 条**，新线索 %d 条" % (len(records), len(leads)),
                           "、".join("%s %d" % (k, v) for k, v in sorted(by_type.items(), key=lambda x: -x[1])) or "无"],
-                         color="blue")]
+                         color="violet")]
         blocks += intel_blocks(sorted(records, key=lambda r: SIG_ORDER.get(r.get("significance"), 3))[:4])[0]
         blocks.append({"tag": "markdown",
                        "content": "<font color='grey'>窗口起点：%s</font>" % (anchor or "首次运行"),
                        "text_size": "notation"})
         card = build_card("市场情报日报", core.now_iso().replace("T", " ")[:16], blocks,
-                          tags=[("%d 条动态" % len(records), "blue"), ("%d 条新线索" % len(leads), "green")])
+                          template="violet",
+                          tags=[("%d 条动态" % len(records), "violet"), ("%d 条新线索" % len(leads), "green")],
+                          icon={**INTEL_ICON, "color": "violet"})
         path = write_card(ws, "card-digest-%s.json" % stamp(), card)
     print("摘要卡已产出: %s（发送成功后请跑 --digest --commit 推进锚点）" % path)
     return 0

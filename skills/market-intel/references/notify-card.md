@@ -7,14 +7,18 @@
 
 ## 一、market-intel 的卡片族
 
+**视觉差异纪律**：market-intel 情报卡族统一**紫色系**（violet 头 + `report_outlined` 图标 +
+violet-50/violet-100 描边块），与 change-watch 的蓝色铃铛监控卡一眼区分，避免群里混淆。
+语义色共用不改：红=强提醒/P0、绿=正常/P1、黄=异常。改样式必须先在临时测试群实测渲染。
+
 | 卡片（脚本产出） | 内容 | header template | 接收方 |
 |---|---|---|---|
 | `card-daily-<时间>.json` | 每日内参（需求文档三段式，indigo 头图） | indigo | 群 |
-| `card-intel-<时间>.json` | 本轮情报简报（含类型/重要性标签） | blue | 群 |
+| `card-intel-<时间>.json` | 本轮情报简报（violet 头 + report 图标 + violet 块） | violet | 群 |
 | `card-intel-<时间>-group.json` | 含重要动态时的群强提醒（首行 @ 提醒） | red | 群 @ |
 | `card-leads-<时间>.json` | 新线索（含匹配度、命中规则、证据） | green/red | 本人私信 |
 | `card-leads-<时间>-group.json` | P0 线索群卡（首行 @ 提醒） | red | 群 @ |
-| `card-digest-<时间>.json` | 内参卡渲染失败时的 simple 降级版 | blue | 群 |
+| `card-digest-<时间>.json` | 内参卡渲染失败时的 simple 降级版 | violet | 群 |
 | `card-status-<时间>.json` | 扫描状态知会（失败/停更点名） | yellow/green | 本人私信 |
 
 群卡首行 @ 提醒由 notify.json `notify.mention` 驱动（`"all"` = `<at id=all></at>`，
