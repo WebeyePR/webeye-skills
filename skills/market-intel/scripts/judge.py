@@ -305,6 +305,8 @@ def _lead_elements(leads, limit=3, view_url=None):
             lines.append("业务描述：%s" % ld["profile"])
         if ld.get("opportunity"):
             lines.append("**最大机会：%s**" % ld["opportunity"])
+        if ld.get("sources"):
+            lines.append(_sources_line(ld["sources"]))
         els.append(_button(ld.get("entity_name") or "查看线索", ld.get("url") or LEAD_POOL_VIEW_URL,
                            btype="danger_text", size="medium"))
         els.append({"tag": "markdown", "content": "\n\n".join(lines), "text_size": "notation"})
@@ -563,6 +565,9 @@ def lead_sources(fact):
     for fe in fact.get("funding_events") or []:
         if fe.get("source_url"):
             out.append({"name": fe.get("source_name") or "融资报道", "url": fe["source_url"]})
+    for oe in fact.get("other_events") or []:
+        if oe.get("source_url"):
+            out.append({"name": oe.get("source_name") or "动态报道", "url": oe["source_url"]})
     for hs in fact.get("hiring_signals") or []:
         if hs.get("page_url"):
             out.append({"name": "招聘页", "url": hs["page_url"]})
@@ -592,6 +597,15 @@ def cmd_lead_card(ws):
     leads = [by_id[i] for i in run_ids if i in by_id]
     if not leads:
         raise SystemExit("[error] leads.jsonl 里找不到最近一轮的线索，疑被手工清理")
+    # 来源行实时重算：旧版落盘线索可能没带 sources（如 other_event 命中的），
+    # 从企业档案补齐，保证卡片上"来源 · xx"始终可溯源。
+    for ld in leads:
+        if not ld.get("sources"):
+            fact = facts_mod.load_fact(ws, ld.get("entity_id")) or {}
+            fresh = lead_sources(fact)
+            if fresh:
+                ld["sources"] = fresh
+                ld.setdefault("url", fresh[0]["url"])
     notify_cfg = load_notify(ws)
     view_url = (notify_cfg.get("bitable") or {}).get("view_url")
     p0_leads = [l for l in leads if l.get("priority") == "P0"]

@@ -530,6 +530,22 @@ class TestLeadCardJump(unittest.TestCase):
         self.assertIn("**地点：** ", content)
         self.assertIn("**看点：** ", content)
 
+    def test_lead_sources_includes_other_events(self):
+        """other_event 命中的线索（业务暴增等）也要有来源行，不能只剩融资+招聘。"""
+        fact = {"funding_events": [],
+                "other_events": [{"detail": "Keeta 巴西扩张", "source_name": None,
+                                  "source_url": "http://www.baijing.cn/article/57116"}],
+                "hiring_signals": []}
+        srcs = judge.lead_sources(fact)
+        self.assertEqual(srcs, [{"name": "动态报道", "url": "http://www.baijing.cn/article/57116"}])
+        blocks = judge.lead_blocks([{"entity_name": "美团", "industries": ["电商/互联网"],
+                                     "priority": "P0", "score": 80,
+                                     "matched_group_names": ["p0-surge"], "evidence": [],
+                                     "sources": srcs}], view_url=None)
+        content = "".join(e["content"] for b in blocks
+                          for e in (b.get("elements") or []) if e.get("tag") == "markdown")
+        self.assertIn("来源 · [动态报道](http://www.baijing.cn/article/57116)", content)
+
 
 if __name__ == "__main__":
     unittest.main()
