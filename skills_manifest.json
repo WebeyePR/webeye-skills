@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Webeye CSBU AI Skills 全局技能元数据注册表",
-  "generated_at": "2026-10-10 14:40:29",
-  "total_skills": 15,
+  "generated_at": "2026-10-23 16:38:17",
+  "total_skills": 16,
   "skills": [
     {
       "name": "agent-proxy-communication",
@@ -82,7 +82,7 @@
       "has_skill_md": true,
       "title": "change-watch（变更雷达）",
       "description": "监控指定目标（公司/产品线/模型）的变更并沉淀为可查询的变更流水。适用于：想知道某公司最近发布了什么/下架了什么/改了什么价；要给某个产品线做持续变更监控并定时通知；要按时间线、类型、对象查看与检索历史变更并溯源到原文；需要\"先分析判断再通知\"，而不是把原文直接转发。触发场景举例：\"Google 最近有什么更新\"、\"盯着 Gemini 的模型上下架\"、\"这类变更定时推给我\"、\"上次那个模型的变更记录在哪\"。",
-      "version": "v20261010",
+      "version": "v20261016.1",
       "author": "Webeye CSBU Team",
       "license": "MIT",
       "alwaysActive": false,
@@ -93,7 +93,8 @@
       "scripts": [
         "scripts/query.py",
         "scripts/log_change.py",
-        "scripts/watch.py"
+        "scripts/watch.py",
+        "scripts/sync_template.py"
       ],
       "references": [
         "references/notify-card.md",
@@ -103,8 +104,8 @@
       "has_env_example": false,
       "has_requirements": false,
       "has_package_json": false,
-      "total_files": 8,
-      "total_lines": 3218,
+      "total_files": 14,
+      "total_lines": 5604,
       "description_en": "Monitor changes of a target (company / product line / model) and accumulate them into a queryable change ledger. Use when you want to know what a company recently released / discontinued / repriced; run continuous change monitoring for a product line with scheduled notifications; retrieve and trace historical changes by timeline, type, or object back to the source; and \"analyze-then-notify\" rather than forwarding raw text. Trigger examples: \"What's new from Google\", \"Watch Gemini's model additions/removals\", \"Push these changes to me on a schedule\", \"Where's the change record for that model\".",
       "agent_created": true
     },
@@ -343,6 +344,49 @@
       "has_package_json": false,
       "total_files": 3,
       "total_lines": 150
+    },
+    {
+      "name": "market-intel",
+      "path": "skills/market-intel",
+      "has_skill_md": true,
+      "title": "market-intel（市场情报雷达）",
+      "description": "监控市场情报并发现潜在客户。两大能力：① 行业最新动态监控——持续抓取行业媒体/公众号/官网渠道， 差分出新内容，AI 判断后产出飞书情报简报与每日日报；② 潜在客户企业发现——把融资事件、招聘信号等 事实聚合到企业档案，按\"域限定 + 信号组\"规则（当前：AI/电商/游戏行业内，近期融资、正在招聘、 大额融资）确定性匹配打分，高分线索飞书推送并可落多维表格（二期激活）。适用于：\"最近 AI/电商/游戏 行业有什么动态\"、\"帮我盯正在融资、在招算法岗的公司\"、\"这类线索定时推给我\"、\"某家公司我们 档案里有什么信息\"。触发举例：\"市场情报简报\"、\"发现了哪些潜在客户\"、\"把某公司加入监控\"。",
+      "version": "0.1.0",
+      "author": "Webeye CSBU Team",
+      "license": "MIT",
+      "alwaysActive": false,
+      "status": "开发中",
+      "complexity": "高",
+      "reusability": "高",
+      "category": "业务自动化",
+      "scripts": [
+        "scripts/facts.py",
+        "scripts/collect.py",
+        "scripts/diffcore.py",
+        "scripts/query.py",
+        "scripts/.gitkeep",
+        "scripts/core.py",
+        "scripts/pipeline.py",
+        "scripts/judge.py",
+        "scripts/match.py"
+      ],
+      "references": [
+        "references/notify-card.md",
+        "references/.gitkeep",
+        "references/lead-criteria.md",
+        "references/sources-guide.md",
+        "references/rules-guide.md",
+        "references/intel-criteria.md"
+      ],
+      "tests": [
+        "tests/test_market_intel.py",
+        "tests/.gitkeep"
+      ],
+      "has_env_example": true,
+      "has_requirements": false,
+      "has_package_json": false,
+      "total_files": 25,
+      "total_lines": 2586
     },
     {
       "name": "webeye-kb-organizer",
