@@ -1,0 +1,117 @@
+{
+  "_comment": "market-intel 公共数据源登记册。首次运行会复制到工作区（默认 ~/.market-intel/sources.json），此后以工作区那份为准。两个需求（intel=行业情报 / lead=线索发现）共用这份清单，按 serves 字段按需选用；采集参数统一，不按需求分裂。字段语义见 references/sources-guide.md。",
+  "version": 1,
+  "settings": {
+    "stale_after_hours": 168,
+    "_comment_stale": "全局停更阈值（小时）。单源可用同名字段覆盖；写 null 表示该源不检查停更。",
+    "request_timeout_seconds": 30,
+    "request_retries": 1,
+    "collect_concurrency": 6,
+    "host_concurrency": 2,
+    "collect_wall_clock_seconds": 300,
+    "_comment_concurrency": "并发采集约束沿用 change-watch：collect_concurrency=全局线程数，host_concurrency=同域名并发上限，collect_wall_clock_seconds=整轮壁钟上限。排查时把 collect_concurrency 设为 1 退回串行。"
+  },
+  "sources": [
+    {
+      "id": "qbitai-feed",
+      "name": "量子位",
+      "kind": "rss",
+      "url": "https://www.qbitai.com/feed",
+      "enabled": true,
+      "serves": ["intel", "lead"],
+      "tier": "T2",
+      "owner_entity": null,
+      "tags": ["媒体", "AI", "融资事件"],
+      "windowed": true,
+      "stale_after_hours": 168,
+      "notes": "2026-10-23 实测可用（原生 WordPress RSS）。AI 行业动态与融资报道主力中文源。"
+    },
+    {
+      "id": "leiphone-feed",
+      "name": "雷峰网",
+      "kind": "rss",
+      "url": "https://www.leiphone.com/feed",
+      "enabled": true,
+      "serves": ["intel", "lead"],
+      "tier": "T2",
+      "owner_entity": null,
+      "tags": ["媒体", "AI", "行业"],
+      "windowed": true,
+      "stale_after_hours": 168,
+      "notes": "2026-10-23 实测可用。"
+    },
+    {
+      "id": "geekpark-rss",
+      "name": "极客公园",
+      "kind": "rss",
+      "url": "https://www.geekpark.net/rss",
+      "enabled": true,
+      "serves": ["intel", "lead"],
+      "tier": "T2",
+      "owner_entity": null,
+      "tags": ["媒体", "行业", "产品"],
+      "windowed": true,
+      "stale_after_hours": 168,
+      "notes": "2026-10-23 实测可用。"
+    },
+    {
+      "id": "techcrunch-feed",
+      "name": "TechCrunch",
+      "kind": "rss",
+      "url": "https://techcrunch.com/feed/",
+      "enabled": true,
+      "serves": ["intel", "lead"],
+      "tier": "T2",
+      "owner_entity": null,
+      "tags": ["媒体", "融资事件", "海外"],
+      "windowed": true,
+      "stale_after_hours": 72,
+      "notes": "2026-10-23 实测可用。更新频率高（小时级），停更阈值收紧到 3 天。融资事件报道密度高，是线索发现的重要英文源。"
+    },
+    {
+      "id": "example-36kr-rsshub",
+      "name": "36氪快讯（RSSHub 自部署）",
+      "kind": "mp_account",
+      "url": "http://127.0.0.1:1200/36kr/newsflights",
+      "enabled": false,
+      "serves": ["intel", "lead"],
+      "tier": "T2",
+      "owner_entity": null,
+      "tags": ["媒体", "快讯", "融资事件"],
+      "windowed": true,
+      "stale_after_hours": 72,
+      "notes": "36氪原生 RSS 已失效（2026-10-23 实测返回 HTML）。此条为自部署 RSSHub 示例：公共实例 rsshub.app 被 Cloudflare 拦截不可用，须自建实例后把 url 换成实际地址并把 enabled 改为 true。"
+    },
+    {
+      "id": "example-itjuzi-mp",
+      "name": "IT桔子公众号（RSSHub 自部署）",
+      "kind": "mp_account",
+      "url": "http://127.0.0.1:1200/wechat/uread/itjuzi",
+      "enabled": false,
+      "serves": ["lead"],
+      "tier": "T1_5",
+      "owner_entity": null,
+      "tags": ["融资事件", "创投数据库"],
+      "windowed": true,
+      "stale_after_hours": 336,
+      "notes": "微信公众号采集依赖搜狗通道，时灵时不灵：必须低频轮询（建议 >=120 分钟），失败会显式报错而非静默空结果。作为线索发现的补充源，不作为唯一信源。"
+    },
+    {
+      "id": "example-company-careers",
+      "name": "示例：某公司官网招聘页（页面监测）",
+      "kind": "web_page",
+      "url": "https://example-company.com/about/careers",
+      "enabled": false,
+      "serves": ["lead"],
+      "tier": "T1",
+      "owner_entity": "example-company",
+      "tags": ["招聘信号"],
+      "windowed": false,
+      "stale_after_hours": null,
+      "config": {
+        "keywords": ["算法工程师", "大模型", "后端开发", "增长运营"]
+      },
+      "notes": "官网招聘页差分：config.keywords 里列出的关键词在页面出现/消失时各产出一条变更（岗位新增/下线是最强的业务扩张信号）。owner_entity 指向词表里的公司，档案直接归到它名下。示例域名为占位，使用时替换为真实目标公司招聘页。"
+    }
+  ]
+}

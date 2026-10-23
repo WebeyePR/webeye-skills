@@ -1,0 +1,8 @@
+# 工作区 live 配置只在 ~/.market-intel/ 维护，仓库只收脱敏模板（沿用 change-watch 的治理方案）
+config/sources.json
+config/entities.json
+config/rules.json
+config/notify.json
+.DS_Store
+__pycache__/
+*.pyc

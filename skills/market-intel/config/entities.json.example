@@ -1,0 +1,37 @@
+{
+  "_comment": "企业与主体词表：entity 归一化的依据（概念沿用 AIHOT 的 ENTITIES/IDENTITY_LEXICON：aliases 用于认出同一家公司的不同写法，domains 用于按域名认发布方）。规则里 scope 行业、档案 industries 都用这里的 industries 词表取值。换行业/扩名录改这个文件，不改代码。",
+  "version": 1,
+  "industries": ["AI", "电商", "游戏"],
+  "entities": {
+    "zhipu": {
+      "name": "智谱",
+      "aliases": ["智谱", "智谱AI", "GLM", "Z.ai", "Zhipu"],
+      "industries": ["AI"],
+      "domains": ["z.ai", "bigmodel.cn"]
+    },
+    "moonshot": {
+      "name": "月之暗面",
+      "aliases": ["月之暗面", "Kimi", "Moonshot", "Moonshot AI"],
+      "industries": ["AI"],
+      "domains": ["moonshot.cn", "kimi.com"]
+    },
+    "mini-max": {
+      "name": "MiniMax",
+      "aliases": ["MiniMax", "稀宇科技", "海螺AI"],
+      "industries": ["AI"],
+      "domains": ["minimaxi.com"]
+    },
+    "example-ecom": {
+      "name": "示例电商公司",
+      "aliases": ["示例电商"],
+      "industries": ["电商"],
+      "domains": []
+    },
+    "example-game": {
+      "name": "示例游戏公司",
+      "aliases": ["示例游戏"],
+      "industries": ["游戏"],
+      "domains": []
+    }
+  }
+}

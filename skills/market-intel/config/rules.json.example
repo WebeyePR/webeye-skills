@@ -1,0 +1,53 @@
+{
+  "_comment": "线索规则（三层模型，详见 references/rules-guide.md）：命中 = scope 成立 AND（任一 signal_group 成立）。组内 all_of 是 AND，组间是 OR。行业条件只写在 scope 一处、所有组隐式继承——不要把行业条件复制进组里（条件耦合只允许存在一份）。改规则不需要改代码；改完可用历史档案回测。",
+  "version": 1,
+  "scope": {
+    "industry": {
+      "any_of": ["AI", "电商", "游戏"],
+      "_comment": "域限定：档案 industries 与任一行业匹配才继续求值。要扩行业只改这里。"
+    }
+  },
+  "signal_groups": [
+    {
+      "id": "funded-and-hiring",
+      "name": "近期融资且在招",
+      "weight": 70,
+      "all_of": [
+        {
+          "type": "funding_event",
+          "within_days": 180,
+          "_comment": "近 180 天内有已入库的融资事件（金额或轮次不限，有事件即可）。"
+        },
+        {
+          "type": "hiring",
+          "within_days": 30,
+          "keywords_any": ["算法", "大模型", "后端", "增长", "投放"],
+          "_comment": "近 30 天内招聘页监测到任一关键词（岗位关键词出现视为在招信号）。"
+        }
+      ]
+    },
+    {
+      "id": "major-funding",
+      "name": "大额融资",
+      "weight": 65,
+      "all_of": [
+        {
+          "type": "funding_event",
+          "within_days": 180,
+          "min_amount_cny": 10000000,
+          "_comment": "近 180 天内有折合 >= 1000 万人民币的融资事件。金额从原文金额文本近似解析（美元按近似汇率折算），只用于门槛比较、不求精确。"
+        }
+      ]
+    }
+  ],
+  "scoring": {
+    "threshold": 60,
+    "extra_group_bonus": 10,
+    "notify_group_at": 80,
+    "_comment": "score = 命中组里最高的 weight + 每多命中一组加 extra_group_bonus。score >= threshold 才通知（一期宽松+人工确认）；score >= notify_group_at 额外产出群 @ 卡。"
+  },
+  "actions": {
+    "bitable": "leads",
+    "_comment": "确认线索的目标数据集代号；实际写入由 notify.json 的 bitable 预设控制（二期激活）。"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "_comment": "通知配置。字段结构沿用 change-watch 的 notify 块（user_id/chat_id/mention）。卡片由脚本产出（out/card-*.json），直接发送、不要手拼；发送降级链见 references/notify-card.md。bitable 是多维表格的预设（字段映射已定，二期激活写入，走预览→确认→写入断点）。",
+  "version": 1,
+  "notify": {
+    "user_id": "",
+    "chat_id": "REPLACE_WITH_YOUR_GROUP_CHAT_ID",
+    "mention": "all",
+    "_comment": "推送目标：user_id=私信 openId（空=不发私信）；chat_id=群 chat_id（空/占位符=不发群）。情报简报默认发群，高分线索私信+群 @（score >= rules.scoring.notify_group_at 时）。mention: all=@所有人（需群主开权限），或填 [\"ou_xxx\"] 只 @ 指定人。"
+  },
+  "digest": {
+    "enabled": true,
+    "_comment": "行业情报每日摘要（delta 锚点式，消除自然日盲区）：由宿主自动化每天固定时刻跑 `judge.py --digest`，发送成功后跑 `judge.py --digest --commit` 推进锚点（宁重勿漏：发送失败不 commit，下次自动重覆盖）。"
+  },
+  "bitable": {
+    "enabled": false,
+    "app_token": "",
+    "table_id": "",
+    "fields": {
+      "entity_name": "公司名",
+      "industries": "行业",
+      "latest_funding": "最新融资",
+      "matched_groups": "命中规则",
+      "score": "匹配度",
+      "summary": "摘要",
+      "evidence_url": "证据链接",
+      "status": "状态",
+      "logged_at": "发现时间"
+    },
+    "_comment": "飞书多维表格预设：一期线索只落 log/leads.jsonl（字段与此映射一一对应），二期把 enabled 改 true 后接入飞书开放平台写入。写入属对外写操作，激活后走「预览→确认→写入」断点。"
+  }
+}
