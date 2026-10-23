@@ -354,6 +354,12 @@ def commit(ws, cfg, yes=False):
         d = _cli(["+record-batch-create", "--json", body] + (["--yes"] if yes else []), cfg)
         if d.get("ok"):
             new_rid = ((d.get("data") or {}).get("records") or [{}])[0].get("record_id")
+            if not new_rid:
+                # 防御：个别响应结构解析不到 record_id，用检索兜底，保证「查看线索」定位链不断
+                new_rid = _search_company(name, cfg)
+                if new_rid:
+                    sys.stderr.write("[bitable] %s 写入成功但响应未含 record_id，检索兜底到 %s\n"
+                                     % (name, new_rid))
             pushed += 1
             updates[it["lead_id"]] = {"bitable_status": "pushed", "bitable_record_id": new_rid}
             logs.append({"lead_id": it["lead_id"], "company": name, "result": "pushed",
