@@ -1,88 +1,90 @@
 {
-  "_comment": "通知配置。字段结构沿用 change-watch 的 notify 块（user_id/chat_id/mention）。卡片由脚本产出（out/card-*.json），直接发送、不要手拼；发送降级链见 references/notify-card.md。bitable 预设对接「猎隼线索池」（已存在的表，字段映射按需求文档卡片示例预设；实际表结构读取需要 base 权限，接入后校准）。",
-  "version": 2,
-  "notify": {
-    "user_id": "",
-    "chat_id": "REPLACE_WITH_YOUR_GROUP_CHAT_ID",
-    "mention": "all",
-    "_comment": "推送目标：user_id=私信 openId（空=不发私信）；chat_id=群 chat_id（空/占位符=不发群）。情报简报默认发群，P0 线索私信+群 @（score >= rules.scoring.notify_group_at 时）。mention: all=@所有人（需群主开权限），或填 [\"ou_xxx\"] 只 @ 指定人。"
+ "_comment": "通知配置。字段结构沿用 change-watch 的 notify 块（user_id/chat_id/mention）。卡片由脚本产出（out/card-*.json），直接发送、不要手拼；发送降级链见 references/notify-card.md。bitable 预设对接「猎隼线索池」（已存在的表，字段映射按需求文档卡片示例预设；实际表结构读取需要 base 权限，接入后校准）。",
+ "version": 2,
+ "notify": {
+  "user_id": "",
+  "chat_id": "REPLACE_WITH_YOUR_GROUP_CHAT_ID",
+  "mention": "all",
+  "_comment": "推送目标：user_id=私信 openId（空=不发私信）；chat_id=群 chat_id（空/占位符=不发群）。情报简报默认发群，P0 线索私信+群 @（score >= rules.scoring.notify_group_at 时）。mention: all=@所有人（需群主开权限），或填 [\"ou_xxx\"] 只 @ 指定人。"
+ },
+ "digest": {
+  "enabled": true,
+  "template": "briefing",
+  "_comment": "每日内参卡：template=briefing 为需求文档三段式版式（活动日历/行业重点新闻/潜在客户与业务情报，indigo 头图）；渲染失败自动降级 simple 版式（宁重勿漏）。delta 锚点式：每天固定时刻跑 judge.py --digest，发送成功后跑 --digest --commit 推进锚点。"
+ },
+ "bitable": {
+  "enabled": false,
+  "app_token": "K1GrbusPBadZzws1DhjcPTionsf",
+  "table_id": "tblIJG9zaVi1I7iM",
+  "view_url": "https://webeye.feishu.cn/base/K1GrbusPBadZzws1DhjcPTionsf?table=tblIJG9zaVi1I7iM&view=vewHOTnMQa",
+  "identity": "user",
+  "batch_size": 10,
+  "default_status": "未跟进",
+  "field_map": {
+   "company": "公司名称",
+   "desc": "一句话业务描述",
+   "track": "所属赛道",
+   "tags": "标签细分",
+   "round": "融资动态",
+   "investors": "背后资方/投资机构",
+   "media": "曝光媒体/合作渠道",
+   "gcp": "GCP切入点",
+   "status": "跟进状态",
+   "captured_at": "抓取时间",
+   "website": "官网链接",
+   "tech_stack": "技术底座",
+   "ceo": "CEO/高管姓名",
+   "size": "企业规模",
+   "founded": "成立年限",
+   "city": "所在城市/区域",
+   "contact": "联系方式(LinkedIn/邮箱)",
+   "icebreaker": "打单破冰话术"
   },
-  "digest": {
-    "enabled": true,
-    "template": "briefing",
-    "_comment": "每日内参卡：template=briefing 为需求文档三段式版式（活动日历/行业重点新闻/潜在客户与业务情报，indigo 头图）；渲染失败自动降级 simple 版式（宁重勿漏）。delta 锚点式：每天固定时刻跑 judge.py --digest，发送成功后跑 --digest --commit 推进锚点。"
+  "maps": {
+   "industry_to_track": {
+    "游戏": "内容创作",
+    "短剧": "内容创作",
+    "AI": "AI应用",
+    "应用": "AI应用",
+    "AI硬件": "AI硬件",
+    "具身智能": "具身智能",
+    "_comment": "所属赛道选项：AI应用/内容创作/具身智能/AI基础设施/AI硬件/智能制造/电商（后两个 2026-10-23 应用户要求新增）。惯例：游戏/短剧归「内容创作」；互联网单标无对应选项不填。",
+    "智能制造": "智能制造",
+    "电商": "电商"
+   },
+   "industry_to_tags": {
+    "游戏": "游戏",
+    "电商": "电商",
+    "短剧": "短剧",
+    "AI硬件": "硬件",
+    "应用": "AIGC",
+    "具身智能": "机器人",
+    "智能制造": "制造",
+    "互联网": null,
+    "_regions": {
+     "北美": "美国|北美|TikTok",
+     "欧洲": "欧洲|德国|英国|法国",
+     "东南亚": "东南亚|印尼|泰国|越南|马来|新加坡"
+    }
+   },
+   "source_to_media": {
+    "36氪": "36kr",
+    "36氪快讯（RSSHub 自部署）": "36kr",
+    "量子位": "量子位",
+    "极客公园": "极客公园",
+    "雷峰网": "雷锋网",
+    "钛媒体": "钛媒体",
+    "品牌方舟": "品牌方舟",
+    "白鲸出海": "白鲸出海",
+    "投资界": "投资界",
+    "智象出海": "智象出海",
+    "机器之心": "机器之心",
+    "智东西": null,
+    "TechCrunch": null,
+    "_comment": "曝光媒体/合作渠道选项里没有的源（智东西/TechCrunch）映射为空=不填，不自造选项。"
+   }
   },
-  "bitable": {
-    "enabled": false,
-    "app_token": "K1GrbusPBadZzws1DhjcPTionsf",
-    "table_id": "tblIJG9zaVi1I7iM",
-    "view_url": "https://webeye.feishu.cn/base/K1GrbusPBadZzws1DhjcPTionsf?table=tblIJG9zaVi1I7iM&view=vewHOTnMQa",
-    "identity": "user",
-    "batch_size": 10,
-    "default_status": "未跟进",
-    "field_map": {
-      "company": "公司名称",
-      "desc": "一句话业务描述",
-      "track": "所属赛道",
-      "tags": "标签细分",
-      "round": "融资动态",
-      "investors": "背后资方/投资机构",
-      "media": "曝光媒体/合作渠道",
-      "gcp": "GCP切入点",
-      "status": "跟进状态",
-      "captured_at": "抓取时间",
-      "website": "官网链接",
-      "tech_stack": "技术底座",
-      "ceo": "CEO/高管姓名",
-      "size": "企业规模",
-      "founded": "成立年限",
-      "city": "所在城市/区域",
-      "contact": "联系方式(LinkedIn/邮箱)",
-      "icebreaker": "打单破冰话术"
-    },
-    "maps": {
-      "industry_to_track": {
-        "游戏": "内容创作",
-        "短剧": "内容创作",
-        "AI": "AI应用",
-        "应用": "AI应用",
-        "AI硬件": "AI硬件",
-        "具身智能": "具身智能",
-        "_comment": "所属赛道选项仅 AI 系（AI应用/内容创作/具身智能/AI基础设施/AI硬件），参照表内既有惯例：游戏/短剧归「内容创作」；电商/互联网/智能制造无对应选项则不填。"
-      },
-      "industry_to_tags": {
-        "游戏": "游戏",
-        "电商": "电商",
-        "短剧": "短剧",
-        "AI硬件": "硬件",
-        "应用": "AIGC",
-        "具身智能": "机器人",
-        "智能制造": "制造",
-        "互联网": null,
-        "_regions": {
-          "北美": "美国|北美|TikTok",
-          "欧洲": "欧洲|德国|英国|法国",
-          "东南亚": "东南亚|印尼|泰国|越南|马来|新加坡"
-        }
-      },
-      "source_to_media": {
-        "36氪": "36kr",
-        "36氪快讯（RSSHub 自部署）": "36kr",
-        "量子位": "量子位",
-        "极客公园": "极客公园",
-        "雷峰网": "雷锋网",
-        "钛媒体": "钛媒体",
-        "品牌方舟": "品牌方舟",
-        "白鲸出海": "白鲸出海",
-        "投资界": "投资界",
-        "智象出海": "智象出海",
-        "机器之心": "机器之心",
-        "智东西": null,
-        "TechCrunch": null,
-        "_comment": "曝光媒体/合作渠道选项里没有的源（智东西/TechCrunch）映射为空=不填，不自造选项。"
-      }
-    },
-    "_human_only": "以下字段留人工维护，机器不写：对接销售、文本 9（跟进状态机器写默认「未跟进」，流转由人工续更）。技术底座/CEO/企业规模/成立年限/所在城市/联系方式/打单破冰话术走 AI 调研补全（标准与契约见 references/bitable-fields.md），查不到填规定兜底值，不猜。",
-    "_comment": "「猎隼线索池」写入预设。2026-10-23 已按真实 field-list 校准（20 字段实测）。流程：judge.py --bitable 产出 out/bitable-pending.json 预览 -> 人工确认 -> judge.py --bitable --commit 经 lark-cli(user 身份) 写入；写入前按公司名称精确去重、按最新 field-list 校验选项值；结果回写 leads.jsonl 与 log/bitable.jsonl。"
-  }
+  "_human_only": "以下字段留人工维护，机器不写：对接销售、文本 9（跟进状态机器写默认「未跟进」，流转由人工续更）。技术底座/CEO/企业规模/成立年限/所在城市/联系方式/打单破冰话术走 AI 调研补全（标准与契约见 references/bitable-fields.md），查不到填规定兜底值，不猜。",
+  "_comment": "「猎隼线索池」写入预设。2026-10-23 已按真实 field-list 校准（20 字段实测）。流程：judge.py --bitable 产出 out/bitable-pending.json 预览 -> 人工确认 -> judge.py --bitable --commit 经 lark-cli(user 身份) 写入；写入前按公司名称精确去重、按最新 field-list 校验选项值；结果回写 leads.jsonl 与 log/bitable.jsonl。"
+ }
 }

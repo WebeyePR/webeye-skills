@@ -56,6 +56,25 @@ def load_notify(ws):
     return rec
 
 
+def mention_md(cfg):
+    """notify.mention -> 飞书卡片 @ 标记。all=<at id=all></at>；列表=逐个 @；空=空串。
+    语法沿用 change-watch 群卡实测（card-status-*-group.json）。"""
+    m = (cfg or {}).get("mention")
+    if m == "all":
+        return "<at id=all></at>"
+    if isinstance(m, list) and m:
+        return " ".join("<at id=%s></at>" % u for u in m)
+    return ""
+
+
+def _mention_lead(text, cfg):
+    """群卡首行的 @ 提醒元素（mention 配置为空则不产）。"""
+    at = mention_md(cfg)
+    if not at:
+        return None
+    return {"tag": "markdown", "content": "%s %s" % (text, at)}
+
+
 # ---------- grounding：说明里的数字必须能在变更原文里找到 ----------
 
 # 换算兜底系数：单位换算（亿/万、B/M 与中文亿万的互转）+ 美元近似汇率 7.2。
@@ -517,8 +536,10 @@ def cmd_input(ws, input_path):
                           tags=tags)
         cards.append(write_card(ws, "card-intel-%s.json" % stamp(), card))
         if any(r.get("significance") == "high" for r in notified_intel):
+            # 群卡：重要动态 @ 提醒（notify.mention 驱动，默认 @所有人）
+            gels = ([e] if (e := _mention_lead("⚠️ 含重要动态，请关注", notify_cfg.get("notify"))) else []) + blocks
             gcard = build_card("市场情报简报 · 重要", core.now_iso().replace("T", " ")[:16],
-                               blocks, template="red", tags=tags)
+                               gels, template="red", tags=tags)
             cards.append(write_card(ws, "card-intel-%s-group.json" % stamp(), gcard))
     if new_leads:
         p0_leads = [l for l in new_leads if l.get("priority") == "P0"]
@@ -531,8 +552,11 @@ def cmd_input(ws, input_path):
                           tags=[("P0×%d" % len(p0_leads), "red")] if p0_leads else [("%d 条线索" % len(new_leads), "green")])
         cards.append(write_card(ws, "card-leads-%s.json" % stamp(), card))
         if p0_leads:
+            # 群卡：P0 线索 @ 提醒（notify.mention 驱动，默认 @所有人）
+            gblocks = lead_blocks(p0_leads, view_url=view_url)
+            gels = ([e] if (e := _mention_lead("⚠️ P0 线索请尽快建联", notify_cfg.get("notify"))) else []) + gblocks
             gcard = build_card("潜在客户线索 · P0 优先建联", core.now_iso().replace("T", " ")[:16],
-                               lead_blocks(p0_leads, view_url=view_url), template="red",
+                               gels, template="red",
                                tags=[("%d 条 P0 线索，请尽快跟进" % len(p0_leads), "red")])
             cards.append(write_card(ws, "card-leads-%s-group.json" % stamp(), gcard))
 

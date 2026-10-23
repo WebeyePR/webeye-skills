@@ -159,10 +159,16 @@ python3 <技能目录>/scripts/judge.py --input judged.json
 |---|---|---|
 | `card-daily-<时间>.json` | 每日摘要（`--digest`），需求文档三段式内参卡 | 群 |
 | `card-intel-<时间>.json` | 本轮有 notify 的情报 | 群（简报） |
-| `card-intel-<时间>-group.json` | 含 high 情报 | 群 @（红头） |
+| `card-intel-<时间>-group.json` | 含 high 情报 | 群 @（红头，首行 @ 提醒） |
 | `card-leads-<时间>.json` | 本轮有 P0 达标新线索 | 本人私信（P0 红标优先建联） |
-| `card-leads-<时间>-group.json` | 有 P0 线索 | 群 @ |
+| `card-leads-<时间>-group.json` | 有 P0 线索 | 群 @（首行 @ 提醒） |
 | `card-status-<时间>.json` | 无变更但需知会 / 有异常 | 本人私信 |
+
+**群卡 @ 规则**：`*-group.json` 首元素自动带 @ 提醒行，由 notify.json `notify.mention`
+驱动（`"all"` = `<at id=all></at>` @所有人，需群主开"任何人可@所有人"权限；
+`["ou_xxx"]` = 只 @ 指定人；空 = 不 @）。群消息**一律 `--as user`**（沿用 change-watch
+实测纪律：bot 发群卡 @ 不生效且易被折叠）；当前 chat_id=临时测试群，正式启用前切换
+notify.json。
 
 **卡片直接发送脚本产出的 JSON，不要手拼**；发送降级链见 `references/notify-card.md`
 （飞书连接器 bot 身份 → 本地 lark-cli → 落盘 `notify-unsent-*.md` 并会话内明确提醒）。

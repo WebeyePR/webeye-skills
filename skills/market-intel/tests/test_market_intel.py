@@ -605,5 +605,35 @@ class TestLeadCardJump(unittest.TestCase):
         self.assertIn("来源 · [动态报道](http://www.baijing.cn/article/57116)", content)
 
 
+class TestGroupMention(unittest.TestCase):
+    """群卡 @ 提醒：notify.mention 驱动（all/列表/空），沿用 change-watch <at id=all></at> 语法。"""
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+
+    def test_mention_md_variants(self):
+        self.assertEqual(judge.mention_md({"mention": "all"}), "<at id=all></at>")
+        self.assertEqual(judge.mention_md({"mention": ["ou_a", "ou_b"]}),
+                         "<at id=ou_a></at> <at id=ou_b></at>")
+        self.assertEqual(judge.mention_md({"mention": ""}), "")
+        self.assertEqual(judge.mention_md({}), "")
+        self.assertEqual(judge.mention_md(None), "")
+
+    def test_mention_lead_element(self):
+        el = judge._mention_lead("⚠️ 含重要动态", {"mention": "all"})
+        self.assertIsNotNone(el)
+        self.assertEqual(el["tag"], "markdown")
+        self.assertIn("<at id=all></at>", el["content"])
+        self.assertIn("⚠️ 含重要动态", el["content"])
+        self.assertIsNone(judge._mention_lead("x", {}), "mention 为空不产元素")
+
+    def test_group_card_contains_mention(self):
+        at = judge._mention_lead("⚠️ 含重要动态，请关注", {"mention": "all"})
+        card = judge.build_card("市场情报简报 · 重要", "t", [at] + [{"tag": "markdown", "content": "b"}],
+                                template="red")
+        s = json.dumps(card, ensure_ascii=False)
+        self.assertIn("<at id=all></at>", s)
+
+
 if __name__ == "__main__":
     unittest.main()
