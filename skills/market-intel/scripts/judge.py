@@ -203,7 +203,14 @@ def lead_pool_url(lead, view_url):
     return view_url
 
 
+def _active(leads):
+    """过滤掉已被当前规则淘汰（bitable_status=filtered）的线索——它们没入池，
+    不该出现在卡片里，更不能声称"已登记线索池"。"""
+    return [l for l in leads if (l.get("bitable_status") or "pending") != "filtered"]
+
+
 def lead_blocks(leads, limit=5, view_url=None):
+    leads = _active(leads)
     shown = leads[:limit]
     blocks = []
     for ld in shown:
@@ -214,7 +221,12 @@ def lead_blocks(leads, limit=5, view_url=None):
         rules_line = "命中规则：" + "；".join(ld.get("matched_group_names") or ld.get("matched_groups") or [])
         ev_lines = [e.get("detail") for e in (ld.get("evidence") or []) if e.get("detail")][:3]
         body = rules_line + ("：" + "；".join(ev_lines) if ev_lines else "")
-        els = [head, body, _sources_line(ld.get("sources") or [])]
+        els = [head, body]
+        if ld.get("profile"):
+            els.append("业务描述：%s" % ld["profile"])
+        if ld.get("opportunity"):
+            els.append("**最大机会：%s**" % ld["opportunity"])
+        els.append(_sources_line(ld.get("sources") or []))
         pool_url = lead_pool_url(ld, view_url)
         if pool_url:
             els.append(_button("🔍 查看线索", pool_url, size="small"))
@@ -271,6 +283,8 @@ def _activity_elements(records, limit=3):
             lines.append("**地点：** %s" % a["location"])
         if a.get("highlight"):
             lines.append("**看点：** %s" % a["highlight"])
+        if r.get("sources"):
+            lines.append(_sources_line(r["sources"]))
         els.append({"tag": "markdown", "content": "\n".join(lines), "text_size": "notation"})
         if a.get("signup_url"):
             els.append(_button("👉 点我查看详情并报名", a["signup_url"]))
@@ -287,18 +301,29 @@ def _news_elements(records, limit=3):
                     "content": "<font color='red'>**%d. %s**</font>" % (i, r.get("title") or "")})
         if r.get("summary"):
             els.append({"tag": "markdown", "content": r["summary"], "text_size": "notation"})
+        if r.get("sources"):
+            els.append({"tag": "markdown", "content": _sources_line(r["sources"]),
+                        "text_size": "notation"})
         if r.get("url"):
             els.append(_button("让我看看👀", r["url"]))
     return els
 
 
 def _lead_elements(leads, limit=3, view_url=None):
-    """潜在客户段：公司名按钮 + 文档字段式描述 + 猎隼线索池登记按钮（record 级定位）。"""
+    """潜在客户段：公司名按钮 + 文档字段式描述 + 猎隼线索池登记按钮（record 级定位）。
+
+    P0 优先、同优先级按时间倒序——新线索不许被旧线索占掉展示位。
+    """
     els = []
-    for ld in [l for l in leads if l.get("priority") == "P0"][:limit] or leads[:limit]:
+    ranked = sorted(_active(leads), key=lambda l: (l.get("priority") != "P0",
+                                                   core.parse_iso(l.get("logged_at")) or 0), reverse=True)
+    for ld in ranked[:limit]:
         pri_label, _ = PRIORITY_LABEL.get(ld.get("priority") or "P1", PRIORITY_LABEL["P1"])
         lines = ["**%s ｜ %s**" % (ld.get("entity_name") or "未命名", pri_label)]
         lines.append("所属赛道：%s" % ("/".join(ld.get("industries") or []) or "待补充"))
+        groups = ld.get("matched_group_names") or ld.get("matched_groups") or []
+        if groups:
+            lines.append("命中规则：%s" % "；".join(groups))
         if ld.get("summary"):
             lines.append(ld["summary"])
         if ld.get("profile"):
@@ -310,9 +335,12 @@ def _lead_elements(leads, limit=3, view_url=None):
         els.append(_button(ld.get("entity_name") or "查看线索", ld.get("url") or LEAD_POOL_VIEW_URL,
                            btype="danger_text", size="medium"))
         els.append({"tag": "markdown", "content": "\n\n".join(lines), "text_size": "notation"})
-        els.append(_button("该信息已登记【猎隼线索池】，点此查看完整线索",
-                           lead_pool_url(ld, view_url or LEAD_POOL_VIEW_URL),
-                           btype="danger_filled"))
+        pool_url = lead_pool_url(ld, view_url or LEAD_POOL_VIEW_URL)
+        if ld.get("bitable_record_id"):
+            els.append(_button("该信息已登记【猎隼线索池】，点此查看完整线索", pool_url,
+                               btype="danger_filled"))
+        else:
+            els.append(_button("查看【猎隼线索池】", pool_url, btype="danger_filled"))
     return els
 
 
@@ -597,8 +625,11 @@ def cmd_lead_card(ws):
     leads = [by_id[i] for i in run_ids if i in by_id]
     if not leads:
         raise SystemExit("[error] leads.jsonl 里找不到最近一轮的线索，疑被手工清理")
-    # 来源行实时重算：旧版落盘线索可能没带 sources（如 other_event 命中的），
-    # 从企业档案补齐，保证卡片上"来源 · xx"始终可溯源。
+    # 字段实时兜底：旧版落盘线索可能缺 sources/profile/opportunity（如 other_event
+    # 命中的、或调研补全晚于落盘的），从企业档案与 enrichments 契约补齐，
+    # 保证卡片信息面完整、来源可溯源。
+    import bitable as bitable_mod
+    enrichments = bitable_mod.load_enrichments(ws)
     for ld in leads:
         if not ld.get("sources"):
             fact = facts_mod.load_fact(ws, ld.get("entity_id")) or {}
@@ -606,6 +637,10 @@ def cmd_lead_card(ws):
             if fresh:
                 ld["sources"] = fresh
                 ld.setdefault("url", fresh[0]["url"])
+        enr = enrichments.get(ld.get("entity_id")) or {}
+        for k in ("profile", "opportunity"):
+            if not ld.get(k) and enr.get(k):
+                ld[k] = enr[k]
     notify_cfg = load_notify(ws)
     view_url = (notify_cfg.get("bitable") or {}).get("view_url")
     p0_leads = [l for l in leads if l.get("priority") == "P0"]

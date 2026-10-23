@@ -521,6 +521,64 @@ class TestLeadCardJump(unittest.TestCase):
                          "https://x/base?table=t&view=v&record=rec9")
         self.assertIn("查看线索", btns[0]["text"]["content"])
 
+    def test_card_fields_not_lost(self):
+        """各卡片渲染面完整性：数据有就必须渲染，不许静默丢字段。"""
+        lead = {"entity_name": "美团", "industries": ["电商/互联网"], "priority": "P0",
+                "score": 80, "matched_group_names": ["p0-surge"], "evidence": [],
+                "profile": "本地生活巨头，Keeta 出海", "opportunity": "拉美节点与多云成本",
+                "sources": [{"name": "白鲸出海", "url": "https://bw/1"}]}
+        # 独立线索卡：业务描述 + 最大机会 + 来源行都要在
+        blocks = judge.lead_blocks([lead], view_url=None)
+        text = "".join(e["content"] for b in blocks for e in (b.get("elements") or [])
+                       if isinstance(e, dict) and e.get("tag") == "markdown")
+        self.assertIn("业务描述：本地生活巨头", text)
+        self.assertIn("最大机会：拉美节点", text)
+        self.assertIn("来源 · [白鲸出海]", text)
+        # 内参卡潜在客户段：命中规则行要在
+        els = judge._lead_elements([lead], view_url=None)
+        md = " ".join(e["content"] for e in els if e.get("tag") == "markdown")
+        self.assertIn("命中规则：p0-surge", md)
+        self.assertIn("来源 · [白鲸出海]", md)
+        # 内参卡新闻段与活动段：来源行要在
+        rec = {"title": "T", "summary": "S", "type": "产品发布", "significance": "important",
+               "sources": [{"name": "钛媒体", "url": "https://tm/1"}],
+               "url": "https://tm/1"}
+        news = judge._news_elements([rec])
+        self.assertTrue(any("来源 · [钛媒体]" in e.get("content", "") for e in news))
+        act = judge._activity_elements([{**rec, "type": "活动情报",
+                                         "activity": {"name": "GTC", "time": "11月"}}])
+        self.assertTrue(any("来源 · [钛媒体]" in e.get("content", "") for e in act))
+
+    def test_filtered_leads_excluded_and_button_honest(self):
+        """filtered 线索不进卡片；未入池线索不能声称"已登记"。"""
+        fresh = {"entity_name": "美团", "industries": ["电商/互联网"], "priority": "P0",
+                 "score": 80, "matched_group_names": ["p0-surge"], "evidence": [],
+                 "sources": [{"name": "白鲸出海", "url": "https://bw/1"}],
+                 "bitable_status": "exists", "bitable_record_id": "rec1",
+                 "logged_at": "2026-10-23T18:00:00+08:00"}
+        stale = {"entity_name": "OpenAI", "industries": ["AI"], "priority": "P0",
+                 "score": 90, "matched_group_names": ["p0-funding"], "evidence": [],
+                 "bitable_status": "filtered",
+                 "logged_at": "2026-10-23T17:00:00+08:00"}
+        pending = {"entity_name": "新线索公司", "industries": ["游戏"], "priority": "P1",
+                   "score": 60, "matched_group_names": ["p1-profile"], "evidence": [],
+                   "bitable_status": "pending",
+                   "logged_at": "2026-10-23T18:30:00+08:00"}
+        view = "https://x/base?table=t&view=v"
+        blocks = judge.lead_blocks([stale, fresh, pending], view_url=view)
+        text = json.dumps(blocks, ensure_ascii=False)
+        self.assertNotIn("OpenAI", text, "filtered 线索不得出现在卡片")
+        self.assertIn("新线索公司", text)
+        # 内参卡：未入池的不许写"已登记"，必须用中性文案
+        els = judge._lead_elements([stale, fresh, pending], view_url=view)
+        md = json.dumps(els, ensure_ascii=False)
+        self.assertNotIn("OpenAI", md)
+        has_honest = any("查看【猎隼线索池】" in (e.get("text", {}).get("content") or "")
+                         for e in els if e.get("tag") == "button")
+        self.assertTrue(has_honest, "未入池线索按钮文案必须中性")
+        self.assertNotIn("新线索公司已登记", md.replace("**新线索公司", ""),
+                         "未入池线索不能声称已登记")
+
     def test_activity_bold_renders(self):
         recs = [{"type": "活动情报", "activity": {"name": "WAIC 2026", "time": "2026-11-01",
                                                  "location": "上海", "highlight": "出海论坛"}}]
