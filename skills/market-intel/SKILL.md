@@ -9,7 +9,7 @@ description: >-
   潜在客户与业务情报），确认线索对接「猎隼线索池」多维表格（预设待权限校准）。适用于："最近八行业
   有什么动态"、"帮我盯种子到B轮刚融资的出海公司"、"这类线索定时推给我"。触发举例："市场情报简报"、
   "发现了哪些潜在客户"、"把某公司加入监控"。
-version: 0.2.1
+version: 0.2.2
 author: Webeye CSBU Team
 license: MIT
 alwaysActive: false
@@ -158,6 +158,7 @@ python3 <技能目录>/scripts/judge.py --input judged.json
 | 卡片 | 何时出现 | 发给谁 |
 |---|---|---|
 | `card-daily-<时间>.json` | 每日摘要（`--digest`），需求文档三段式内参卡 | 群 |
+| `card-digest-<时间>.json` | 内参卡渲染失败时的 simple 降级版 | 群 |
 | `card-intel-<时间>.json` | 本轮有 notify 的情报 | 群（简报） |
 | `card-intel-<时间>-group.json` | 含 high 情报 | 群 @（红头，首行 @ 提醒） |
 | `card-leads-<时间>.json` | 本轮有 P0 达标新线索 | 本人私信（P0 红标优先建联） |

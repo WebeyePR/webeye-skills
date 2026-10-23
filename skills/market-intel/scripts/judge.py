@@ -693,8 +693,11 @@ def cmd_digest(ws, commit=False):
     leads = [l for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))
              if not anchor or (core.parse_iso(l.get("logged_at")) or 0) > (core.parse_iso(anchor) or 0)]
     if commit:
-        all_logged = [r.get("logged_at") for r in core.read_jsonl(os.path.join(ws, "log", "intel.jsonl"))]
-        new_anchor = max([a for a in all_logged if a] + [anchor or ""])
+        # 锚点必须同时覆盖情报与线索的 logged_at：只看 intel 会把更晚落盘的线索
+        # 留在窗口里，下期日报重复展示已发过的线索（宁重勿漏只对情报成立，线索有去重键）。
+        stamps = [r.get("logged_at") for r in core.read_jsonl(os.path.join(ws, "log", "intel.jsonl"))] \
+            + [l.get("logged_at") for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))]
+        new_anchor = max([a for a in stamps if a] + [anchor or ""])
         core.jdump(os.path.join(ws, "state", "digest_anchor.json"), {"anchor": new_anchor, "committed_at": now})
         print("摘要锚点已推进到: %s" % new_anchor)
         return 0

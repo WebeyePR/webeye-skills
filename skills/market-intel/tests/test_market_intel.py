@@ -635,5 +635,34 @@ class TestGroupMention(unittest.TestCase):
         self.assertIn("<at id=all></at>", s)
 
 
+class TestDigestAnchor(unittest.TestCase):
+    """日报锚点：必须同时覆盖 intel 与 leads 的 logged_at，漏 leads 会重复展示已发线索。"""
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        import tempfile
+        self.ws = tempfile.mkdtemp(prefix="mi-digest-")
+        os.makedirs(os.path.join(self.ws, "log"), exist_ok=True)
+        with open(os.path.join(self.ws, "log", "intel.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"change_id": "a", "logged_at": "2026-10-23T08:00:00+08:00"}, ensure_ascii=False) + "\n")
+        with open(os.path.join(self.ws, "log", "leads.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"lead_id": "b", "logged_at": "2026-10-23T21:00:00+08:00"}, ensure_ascii=False) + "\n")
+
+    def test_commit_anchor_covers_leads(self):
+        judge.cmd_digest(self.ws, commit=True)
+        anchor = core.jload(os.path.join(self.ws, "state", "digest_anchor.json"), {}).get("anchor")
+        self.assertEqual(anchor, "2026-10-23T21:00:00+08:00",
+                         "锚点取 intel+leads 的 max logged_at；只看 intel 会漏掉更晚的线索")
+
+    def test_window_includes_lead_after_anchor(self):
+        core.jdump(os.path.join(self.ws, "state", "digest_anchor.json"),
+                   {"anchor": "2026-10-23T08:00:00+08:00"})
+        # 模拟 cmd_digest 的窗口过滤：锚点之后落盘的线索必须进窗口
+        anchor = "2026-10-23T08:00:00+08:00"
+        leads = [l for l in core.read_jsonl(os.path.join(self.ws, "log", "leads.jsonl"))
+                 if (core.parse_iso(l.get("logged_at")) or 0) > (core.parse_iso(anchor) or 0)]
+        self.assertEqual(len(leads), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

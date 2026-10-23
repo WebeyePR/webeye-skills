@@ -115,7 +115,8 @@
     "investors": "资方A、资方B（可省略=沿用档案）",
     "icebreaker": "100~150字破冰话术",
     "profile": "修订后的一句话业务描述（可省略）",
-    "opportunity": "修订后的GCP切入点（可省略）"
+    "opportunity": "修订后的GCP切入点（可省略）",
+    "website": "https://官网（可省略；由写入链路统一包成 markdown 链接）"
   },
   "sources": [{"name": "来源名", "url": "https://..."}],
   "notes": "查证过程/存疑点（可选）"

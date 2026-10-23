@@ -101,7 +101,7 @@
       "name": "36氪快讯（RSSHub 自部署）",
       "kind": "mp_account",
       "url": "http://127.0.0.1:1200/36kr/newsflashes",
-      "enabled": false,
+      "enabled": true,
       "serves": [
         "intel",
         "lead"
