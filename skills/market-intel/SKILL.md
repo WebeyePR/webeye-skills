@@ -1,13 +1,15 @@
 ---
 name: market-intel
 description: >-
-  监控市场情报并发现潜在客户。两大能力：① 行业最新动态监控——持续抓取行业媒体/公众号/官网渠道，
-  差分出新内容，AI 判断后产出飞书情报简报与每日日报；② 潜在客户企业发现——把融资事件、招聘信号等
-  事实聚合到企业档案，按"域限定 + 信号组"规则（当前：AI/电商/游戏行业内，近期融资、正在招聘、
-  大额融资）确定性匹配打分，高分线索飞书推送并可落多维表格（二期激活）。适用于："最近 AI/电商/游戏
-  行业有什么动态"、"帮我盯正在融资、在招算法岗的公司"、"这类线索定时推给我"、"某家公司我们
-  档案里有什么信息"。触发举例："市场情报简报"、"发现了哪些潜在客户"、"把某公司加入监控"。
-version: 0.1.0
+  监控市场情报并发现潜在客户（需求源：市场情报内参闭环需求文档）。四大版块：① 潜在客户挖取——
+  把融资/招聘/业务暴增/榜单新晋等事实聚合到企业档案，按"三维域限定（八行业+中国企业+业务出海）
+  + P0/P1 信号组"确定性匹配，P0（近1月融资/近3月业务暴增/新品发布/榜单新晋任一）优先建联推送，
+  P1 入池进日报；② 重点资讯情报——Gemini 竞对模型/价格、Google Cloud、八行业趋势；
+  ③ 活动情报——B2B 出海活动白名单筛选；④ 每日内参——需求文档三段式卡片（活动日历/行业重点新闻/
+  潜在客户与业务情报），确认线索对接「猎隼线索池」多维表格（预设待权限校准）。适用于："最近八行业
+  有什么动态"、"帮我盯种子到B轮刚融资的出海公司"、"这类线索定时推给我"。触发举例："市场情报简报"、
+  "发现了哪些潜在客户"、"把某公司加入监控"。
+version: 0.2.1
 author: Webeye CSBU Team
 license: MIT
 alwaysActive: false
@@ -104,20 +106,33 @@ python3 <技能目录>/scripts/pipeline.py --run     # 退出码: 0 正常 / 1 �
      "title": "…（公司/产品名必须在原文出现过）", "summary": "一句话说清发生了什么、影响谁",
      "url": "原文链接", "sources": [{"name": "量子位", "url": "…"}],
      "notify": true, "notify_reason": "为何值得看",
-     "number_notes": {"300": "300亿美元 = 原文 $30B 单位换算"}}
+     "number_notes": {"300": "300亿美元 = 原文 $30B 单位换算"}},
+    {"change_id": "…", "type": "活动情报", "significance": "normal",
+     "title": "快手技术沙龙", "summary": "…", "url": "…", "sources": [],
+     "activity": {"name": "…", "time": "…", "location": "…", "highlight": "…",
+                  "signup_url": "…"},
+     "notify": true, "notify_reason": "B2B 出海活动"}
   ],
   "facts": [
-    {"entity_name": "月之暗面", "aliases": ["Kimi"], "industries": ["AI"],
+    {"entity_name": "月之暗面", "aliases": ["Kimi"], "industries": ["应用"],
+     "origin": "CN", "going_global": true,
+     "profile": "一句话业务描述（可选）", "opportunity": "最大机会点（可选）",
      "event_type": "funding",
      "event": {"date": "2026-10-20", "round": "B轮", "amount_text": "3亿美元",
                "investors": "腾讯、阿里", "source_name": "36氪", "source_url": "…"},
+     "change_ids": ["…"], "confidence": "high"},
+    {"entity_name": "某上榜公司", "industries": ["应用"], "origin": "CN",
+     "going_global": true, "event_type": "other",
+     "event": {"kind": "rank_new_entry", "detail": "新晋 AI产品榜 出海总榜 Top20",
+               "source_url": "…"},
      "change_ids": ["…"], "confidence": "high"}
   ]
 }
 ```
 
-判断准则见 `references/intel-criteria.md`（情报四问）与 `references/lead-criteria.md`
-（事实抽取与防张冠李戴）。三条铁律沿用 change-watch：
+判断准则见 `references/intel-criteria.md`（情报四问 + 竞对关注）、
+`references/lead-criteria.md`（事实抽取、八行业口径、kinds 约定、防张冠李戴）与
+`references/activities-criteria.md`（活动情报白名单/黑名单）。三条铁律沿用 change-watch：
 
 - **漏答一条 = 判断不完整**：每个 `change_id` 必须被 intel（含 discard / merged）或
   facts.change_ids 覆盖，`judge.py` 会核对，缺一条点名退出码 2；
@@ -137,15 +152,16 @@ python3 <技能目录>/scripts/judge.py --input judged.json
 ```
 
 脚本依次：覆盖度校验 → 情报流水落盘（grounding 数字核对）→ 企业事实并入档案
-（web_page 招聘关键词确定性直录）→ 规则匹配出线索 → 产出卡片：
+（web_page 招聘关键词确定性直录）→ 规则匹配出线索（scope 三维硬筛 + 组间 OR；
+任一 tier=P0 组命中 → P0 线索实时通知，仅 P1 组命中 → 入池进日报不实时打扰）→ 产出卡片：
 
 | 卡片 | 何时出现 | 发给谁 |
 |---|---|---|
+| `card-daily-<时间>.json` | 每日摘要（`--digest`），需求文档三段式内参卡 | 群 |
 | `card-intel-<时间>.json` | 本轮有 notify 的情报 | 群（简报） |
 | `card-intel-<时间>-group.json` | 含 high 情报 | 群 @（红头） |
-| `card-leads-<时间>.json` | 本轮有达标新线索 | 本人私信 |
-| `card-leads-<时间>-group.json` | 线索分 ≥ `notify_group_at`（默认 80） | 群 @ |
-| `card-digest-<时间>.json` | 每日摘要（`--digest`） | 群 |
+| `card-leads-<时间>.json` | 本轮有 P0 达标新线索 | 本人私信（P0 红标优先建联） |
+| `card-leads-<时间>-group.json` | 有 P0 线索 | 群 @ |
 | `card-status-<时间>.json` | 无变更但需知会 / 有异常 | 本人私信 |
 
 **卡片直接发送脚本产出的 JSON，不要手拼**；发送降级链见 `references/notify-card.md`
@@ -190,6 +206,23 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
 **每日摘要（固定时刻，如 08:30）**：跑 `judge.py --digest` 产卡发群；**发送成功后**再跑
 `judge.py --digest --commit` 推进锚点（宁重勿漏：失败不 commit，下次自动重覆盖）。
 
+**线索入池「猎隼线索池」多维表格**（notify.json `bitable` 块驱动，已按真实字段校准）：
+
+1. `judge.py --bitable` —— 把待写线索构建为 `out/bitable-pending.json` 预览（离线）。
+   构建时会用**当前规则重算匹配**：旧规则遗留、现已不满足"中国企业+出海"硬筛的线索
+   自动标记 filtered 排除；记录只填机器可靠字段（公司名称/业务描述/赛道/标签细分/
+   融资轮次/资方/曝光媒体/GCP切入点/跟进状态/抓取时间/官网兜底链接）。
+2. **AI 调研补全**（`--bitable` 预览前后皆可）：按 `references/bitable-fields.md` 字段标准，
+   用已有数据源（facts 档案/情报流水）+ 联网调研补齐 技术底座/CEO/企业规模/成立年限/
+   所在城市/联系方式/打单破冰话术，写 `log/enrichments.jsonl`（契约见该文档）；
+   查不到填规定兜底值（未查明/未公开/未查询到有效信息），**不猜**；重新跑
+   `judge.py --bitable` 让预览带上补全字段。select 值写入前仍过选项校验。
+3. 人工确认预览后 `judge.py --bitable --commit` —— 按「公司名称」精确检索去重
+   （已存在跳过），按最新 field-list 校验选项值后写入，结果回写 leads.jsonl 与
+   `log/bitable.jsonl`。重复执行幂等（exists 不重写）。
+4. `judge.py --lead-card` —— 写入后重产最近一轮线索卡：每条线索来源旁带
+   「查看线索」按钮，record 级直达表格对应记录（未入池回退表视图）。发送这版卡片。
+
 ## 已知边界与陷阱（一期实测）
 
 1. **中文媒体原生 RSS 大多已死**：36氪/机器之心等传统 RSS 地址实测返回 HTML（2026-10-23）。
@@ -200,9 +233,10 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
    不要把它当唯一信源。
 3. **RSS 键规则**：链接唯一用链接；多条共用链接用 Atom id/guid（change-watch 陷阱19 的移植）。
    给新源配 RSS 前先看条目是否共用链接。
-4. **招聘页监测（web_page）按关键词出现/消失差分**：粒度是"关键词"，不是具体岗位条目；
-   关键词选择决定信噪比，配在源的 `config.keywords` 里。改关键词后需重建该源基线
-   （删除工作区 `state/streams/<source_id>.json` 后重跑 --baseline）。
+4. **web_page 监测有两种模式**（`config.mode`）：`keywords`（默认，招聘页：关键词出现/消失，
+   粒度是关键词不是岗位条目，改关键词后需重建该源基线）；`links`（资讯列表页/榜单页：
+   提取文章链接差分，新出现链接=added，天然实现"排除霸榜只看新晋"的榜单语义）。
+   换模式或改 `link_pattern` 后需重建该源基线（删 `state/streams/<source_id>.json` 重跑 --baseline）。
 5. **融资金额是近似值**：`parse_amount_cny` 只用于门槛比较（美元按近似汇率 7.2 折算，
    模糊表述"数千万"按 1000 万下限）。卡片与档案保留原文 `amount_text`，不要拿近似值对外引用。
    英文写法（`$30B` / `$200M` / `$1.5billion`）已支持（实测 TechCrunch 源首次运行曾因
@@ -215,6 +249,21 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
    `unknown:*` 档案待归并——定期归并 unknown 档案并充实词表。
 8. **unknown 档案的悬置**：`unknown:*` 企业不参与通知（匹配可以命中但 AI 应在判断阶段
    尽量给出可归一的公司名）；词表里补上别名后档案自动归并。
+9. **JS 渲染站点纯 HTTP 抓不到**：AI产品榜（aicpb.com）榜单条目为前端渲染，首页锚点
+   只有导航链接（2026-10-23 实测），AppMagic 同理——此类榜单源一期禁用，二期评估
+   无头浏览器；静态渲染的列表页（智东西/品牌方舟/投资界）links 模式实测可用。
+10. **P0/P1 分级口径**（需求文档）：P0 = 近1月融资 / 近3月业务暴增 / 发布新产品 /
+    榜单新晋，任一命中即 P0（市场优先建联，实时通知）；仅满足画像（半年内融资、
+    出海相关招聘）为 P1（入池+日报）。`notify_p1: false` 时 P1 不实时推送。
+11. **grounding 对"B2B"类字母数字缩写会误报**：说明文字里的 B2B、T1 等缩写中的数字
+    会被当成数字核对（实测 2026-10-23），只告警不阻断；在 `number_notes` 里申报
+    （如 `{"2": "B2B 为缩写"}`）即可消除，二期可加缩写白名单。
+12. **卡片 markdown 行内粗体：闭合 `**` 后必须跟空格**：`**时间：**值` 这种
+    "全角标点收尾+紧贴正文"的写法不满足粗体判定，星号原样显示（实测 2026-10-23）；
+    写成 `**时间：** 值` 即可。独占一行的 `**标题**` 不受影响。
+13. **猎隼线索池字段要抄表内惯例**：技术底座查不到填"未查明"、联系方式填
+    "未查询到有效信息"、企业规模/成立年限/城市填"未公开"——不空着、不猜、不造选项；
+    各字段定义与调研渠道见 `references/bitable-fields.md`（按 100 条历史记录反推校准）。
 
 ## 可移植性
 
@@ -229,7 +278,9 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
 - `config/rules.json.example` —— 线索规则模板（三层模型见 `references/rules-guide.md`）
 - `config/notify.json.example` —— 通知目标与多维表格预设
 - `references/intel-criteria.md` —— 行业情报判断准则（改口味改这里）
-- `references/lead-criteria.md` —— 企业事实抽取准则（防张冠李戴）
+- `references/lead-criteria.md` —— 企业事实抽取准则（八行业口径 / kinds 约定 / 防张冠李戴）
+- `references/activities-criteria.md` —— 活动情报判断准则（B2B 白名单 / C 端黑名单）
+- `references/bitable-fields.md` —— 猎隼线索池 20 字段标准（定义/惯例/兜底值/AI 调研契约）
 - `references/notify-card.md` —— 卡片模板与发送降级链
 - `scripts/pipeline.py` —— 初始化 / 基线 / 采集差分
 - `scripts/judge.py` —— 判断落盘 / 规则匹配 / 产卡 / 摘要

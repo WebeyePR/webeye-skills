@@ -1,36 +1,102 @@
 {
-  "_comment": "企业与主体词表：entity 归一化的依据（概念沿用 AIHOT 的 ENTITIES/IDENTITY_LEXICON：aliases 用于认出同一家公司的不同写法，domains 用于按域名认发布方）。规则里 scope 行业、档案 industries 都用这里的 industries 词表取值。换行业/扩名录改这个文件，不改代码。",
-  "version": 1,
-  "industries": ["AI", "电商", "游戏"],
+  "_comment": "企业与主体词表：entity 归一化的依据（概念沿用 AIHOT 的 ENTITIES/IDENTITY_LEXICON：aliases 用于认出同一家公司的不同写法，domains 用于按域名认发布方）。industries 用需求文档八行业口径；实体可标注 origin=CN 与 going_global（词表标注优先于 AI 判断申报）。换行业/扩名录改这个文件，不改代码。",
+  "version": 2,
+  "industries": ["游戏", "电商", "AI硬件", "应用", "具身智能", "智能制造", "短剧", "互联网"],
   "entities": {
     "zhipu": {
       "name": "智谱",
       "aliases": ["智谱", "智谱AI", "GLM", "Z.ai", "Zhipu"],
-      "industries": ["AI"],
+      "industries": ["应用"],
+      "origin": "CN",
+      "going_global": true,
       "domains": ["z.ai", "bigmodel.cn"]
     },
     "moonshot": {
       "name": "月之暗面",
       "aliases": ["月之暗面", "Kimi", "Moonshot", "Moonshot AI"],
-      "industries": ["AI"],
+      "industries": ["应用"],
+      "origin": "CN",
+      "going_global": true,
       "domains": ["moonshot.cn", "kimi.com"]
     },
     "mini-max": {
       "name": "MiniMax",
-      "aliases": ["MiniMax", "稀宇科技", "海螺AI"],
-      "industries": ["AI"],
+      "aliases": ["MiniMax", "稀宇科技", "海螺AI", "MiniMax 海螺"],
+      "industries": ["应用"],
+      "origin": "CN",
+      "going_global": true,
       "domains": ["minimaxi.com"]
+    },
+    "mihoyo": {
+      "name": "米哈游",
+      "aliases": ["米哈游", "miHoHo", "HoYoverse", "原神", "崩坏"],
+      "industries": ["游戏"],
+      "origin": "CN",
+      "going_global": true,
+      "domains": ["mihoyo.com", "hoyoverse.com"]
+    },
+    "shein": {
+      "name": "希音",
+      "aliases": ["希音", "SHEIN", "Shein"],
+      "industries": ["电商"],
+      "origin": "CN",
+      "going_global": true,
+      "domains": ["shein.com"]
+    },
+    "anker": {
+      "name": "安克创新",
+      "aliases": ["安克创新", "安克", "Anker", "Anker Innovations"],
+      "industries": ["AI硬件", "智能制造"],
+      "origin": "CN",
+      "going_global": true,
+      "domains": ["anker.com"]
+    },
+    "fengye-interactive": {
+      "name": "枫叶互动",
+      "aliases": ["枫叶互动", "ReelShort", "CrazyMaple", "疯读"],
+      "industries": ["短剧"],
+      "origin": "CN",
+      "going_global": true,
+      "domains": ["reelshort.com"]
+    },
+    "dajiang": {
+      "name": "大疆",
+      "aliases": ["大疆", "DJI", "大疆创新"],
+      "industries": ["AI硬件", "具身智能", "智能制造"],
+      "origin": "CN",
+      "going_global": true,
+      "domains": ["dji.com"]
+    },
+    "kuaishou": {
+      "name": "快手",
+      "aliases": ["快手", "Kwai", "SnackVideo", "快手科技"],
+      "industries": ["互联网", "短剧"],
+      "origin": "CN",
+      "going_global": true,
+      "domains": ["kuaishou.com"]
+    },
+    "unitree": {
+      "name": "宇树科技",
+      "aliases": ["宇树科技", "宇树", "Unitree"],
+      "industries": ["具身智能", "智能制造"],
+      "origin": "CN",
+      "going_global": true,
+      "domains": ["unitree.com"]
     },
     "example-ecom": {
       "name": "示例电商公司",
       "aliases": ["示例电商"],
       "industries": ["电商"],
+      "origin": "CN",
+      "going_global": true,
       "domains": []
     },
     "example-game": {
       "name": "示例游戏公司",
       "aliases": ["示例游戏"],
       "industries": ["游戏"],
+      "origin": "CN",
+      "going_global": true,
       "domains": []
     }
   }

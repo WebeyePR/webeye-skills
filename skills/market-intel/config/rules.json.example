@@ -1,41 +1,115 @@
 {
-  "_comment": "线索规则（三层模型，详见 references/rules-guide.md）：命中 = scope 成立 AND（任一 signal_group 成立）。组内 all_of 是 AND，组间是 OR。行业条件只写在 scope 一处、所有组隐式继承——不要把行业条件复制进组里（条件耦合只允许存在一份）。改规则不需要改代码；改完可用历史档案回测。",
-  "version": 1,
+  "_comment": "线索规则 v2（三层模型，详见 references/rules-guide.md）：命中 = scope 全维成立 AND（任一 signal_group 成立）。组内 all_of 是 AND，组间是 OR。scope 三维（industry/origin/global）是条件耦合的唯一书写处，所有组隐式继承，不要把行业/中国/出海条件复制进组里。tier=P0 的组任一命中即 P0 级线索（市场优先建联）；仅 P1 组命中为 P1 级（入池+日报，不实时打扰）。改规则不需要改代码；改完可用历史档案回测。",
+  "version": 2,
   "scope": {
     "industry": {
-      "any_of": ["AI", "电商", "游戏"],
-      "_comment": "域限定：档案 industries 与任一行业匹配才继续求值。要扩行业只改这里。"
+      "type": "industry_tag",
+      "any_of": ["游戏", "电商", "AI硬件", "应用", "具身智能", "智能制造", "短剧", "互联网"],
+      "_comment": "需求文档八行业。AI 公司按主营形态标「应用」或「AI硬件」；天然出海的行业在词表标「短剧出海」。"
+    },
+    "origin": {
+      "type": "chinese_company",
+      "_comment": "中国企业：优先档案 origin=CN（词表标注/AI 申报），兜底启发式（人民币融资/公司主体词/中国城市词）。"
+    },
+    "global": {
+      "type": "going_global",
+      "_comment": "业务出海：档案 going_global 或事件/招聘/行业文本含出海关键词（出海/跨境/全球化/海外等）。"
     }
   },
   "signal_groups": [
     {
-      "id": "funded-and-hiring",
-      "name": "近期融资且在招",
-      "weight": 70,
+      "id": "p0-funding-recent",
+      "name": "近1月融资（P0）",
+      "tier": "P0",
+      "weight": 90,
       "all_of": [
         {
           "type": "funding_event",
-          "within_days": 180,
-          "_comment": "近 180 天内有已入库的融资事件（金额或轮次不限，有事件即可）。"
-        },
-        {
-          "type": "hiring",
           "within_days": 30,
-          "keywords_any": ["算法", "大模型", "后端", "增长", "投放"],
-          "_comment": "近 30 天内招聘页监测到任一关键词（岗位关键词出现视为在招信号）。"
+          "_comment": "文档口径：近 1 个月内有新投融资信息即 P0（金额轮次不限）。投融资动态是最高权重信源。"
         }
       ]
     },
     {
-      "id": "major-funding",
-      "name": "大额融资",
-      "weight": 65,
+      "id": "p0-funding-early-round",
+      "name": "种子~B轮融资（P0）",
+      "tier": "P0",
+      "weight": 85,
       "all_of": [
         {
           "type": "funding_event",
           "within_days": 180,
-          "min_amount_cny": 10000000,
-          "_comment": "近 180 天内有折合 >= 1000 万人民币的融资事件。金额从原文金额文本近似解析（美元按近似汇率折算），只用于门槛比较、不求精确。"
+          "round_any": ["种子轮", "天使轮", "Pre-A轮", "Pre-A", "A轮", "A+轮", "Pre-B轮", "Pre-B", "B轮", "B+轮"],
+          "_comment": "文档口径：重点关注种子轮到 B 轮（拿钱后 3~6 个月启动扩张、IT 预算最宽裕）。半年窗口内的早期轮次也升 P0。"
+        }
+      ]
+    },
+    {
+      "id": "p0-business-surge",
+      "name": "近3月业务暴增（P0）",
+      "tier": "P0",
+      "weight": 80,
+      "all_of": [
+        {
+          "type": "other_event",
+          "kind_any": ["business_surge"],
+          "within_days": 90,
+          "_comment": "客户介绍类通稿中的业务数据暴增（用户/收入/订单激增、大力投产销），AI 判断时标 kind=business_surge。"
+        }
+      ]
+    },
+    {
+      "id": "p0-product-launch",
+      "name": "发布新产品（P0）",
+      "tier": "P0",
+      "weight": 80,
+      "all_of": [
+        {
+          "type": "other_event",
+          "kind_any": ["product_launch"],
+          "within_days": 60,
+          "_comment": "发布新产品/新版主产品大更新，AI 判断时标 kind=product_launch。"
+        }
+      ]
+    },
+    {
+      "id": "p0-rank-new-entry",
+      "name": "榜单新晋（P0）",
+      "tier": "P0",
+      "weight": 85,
+      "all_of": [
+        {
+          "type": "other_event",
+          "kind_any": ["rank_new_entry"],
+          "within_days": 60,
+          "_comment": "海外软件榜单新晋（AI产品榜/AppMagic 等，排除霸榜只看新上榜），由榜单页面差分自动产出或 AI 判断标注。"
+        }
+      ]
+    },
+    {
+      "id": "p1-hiring-global",
+      "name": "出海/云成本岗位招聘（P1）",
+      "tier": "P1",
+      "weight": 65,
+      "all_of": [
+        {
+          "type": "hiring",
+          "within_days": 30,
+          "keywords_any": ["出海", "跨境", "全球化", "海外", "云成本"],
+          "_comment": "文档口径：招聘出现明显出海、云成本关键词的企业（新官上任同理，AI 判断时入 hiring 信号）。"
+        }
+      ]
+    },
+    {
+      "id": "p1-funding-180",
+      "name": "近半年融资画像（P1）",
+      "tier": "P1",
+      "weight": 60,
+      "all_of": [
+        {
+          "type": "funding_event",
+          "within_days": 180,
+          "_comment": "半年内融过资但无近 1 月新信号：满足画像的储备线索，P1 只入池与日报，不实时通知。"
         }
       ]
     }
@@ -44,10 +118,11 @@
     "threshold": 60,
     "extra_group_bonus": 10,
     "notify_group_at": 80,
-    "_comment": "score = 命中组里最高的 weight + 每多命中一组加 extra_group_bonus。score >= threshold 才通知（一期宽松+人工确认）；score >= notify_group_at 额外产出群 @ 卡。"
+    "notify_p1": false,
+    "_comment": "score 仅做组内排序与阈值。P0 线索实时通知（score >= threshold）；notify_p1=false 时 P1 只入 leads.jsonl 并进日报摘要，不实时推送——文档口径：P0 市场优先建联，P1 为储备。"
   },
   "actions": {
     "bitable": "leads",
-    "_comment": "确认线索的目标数据集代号；实际写入由 notify.json 的 bitable 预设控制（二期激活）。"
+    "_comment": "确认线索的目标数据集代号；实际写入由 notify.json 的 bitable 预设控制（对接猎隼线索池，激活走预览→确认→写入断点）。"
   }
 }

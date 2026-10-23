@@ -35,12 +35,13 @@ import match as match_mod
 
 INTEL_KEYS = {"change_id", "type", "significance", "object", "title", "summary", "url",
               "sources", "notify", "notify_reason", "merged_change_ids",
-              "discard", "discard_reason"}
+              "discard", "discard_reason", "activity", "number_notes"}
 NOTIFY_KEYS = {"version", "notify", "digest", "bitable"}
 NOTIFY_BLOCK_KEYS = {"user_id", "chat_id", "mention"}
 
 SIG_LABEL = {"high": ("重要", "red"), "normal": ("常规", "blue"), "low": ("次要", "neutral")}
 SIG_ORDER = {"high": 0, "normal": 1, "low": 2}
+PRIORITY_LABEL = {"P0": ("P0 · 优先建联", "red"), "P1": ("P1 · 储备", "blue")}
 
 
 def load_notify(ws):
@@ -142,11 +143,12 @@ CARD_CONFIG = {
 
 
 def _block(md_lines, color="blue", last=False):
+    els = [m if isinstance(m, dict) else {"tag": "markdown", "content": m} for m in md_lines]
     return {"tag": "interactive_container", "width": "fill", "has_border": True,
             "border_color": color + "-100", "corner_radius": "8px", "background_style": color + "-50",
             "padding": "12px 12px 12px 12px", "vertical_spacing": "4px",
             "margin": "0px 0px 12px 0px" if not last else "0px",
-            "elements": [{"tag": "markdown", "content": m} for m in md_lines]}
+            "elements": els}
 
 
 def build_card(title, subtitle, blocks, template="blue", tags=None):
@@ -192,16 +194,31 @@ def intel_blocks(records, limit=5):
     return blocks, len(ordered)
 
 
-def lead_blocks(leads, limit=5):
+def lead_pool_url(lead, view_url):
+    """线索定位 URL：已入池（有 record_id）跳到表格里那条记录；否则回退表视图。"""
+    rid = (lead or {}).get("bitable_record_id")
+    if rid and view_url:
+        return "%s&record=%s" % (view_url, rid) if "?" in view_url \
+            else "%s?record=%s" % (view_url, rid)
+    return view_url
+
+
+def lead_blocks(leads, limit=5, view_url=None):
     shown = leads[:limit]
     blocks = []
     for ld in shown:
-        head = "<text_tag color='blue'>线索</text_tag> <text_tag color='neutral'>%s</text_tag> **%s** · 匹配度 %d" % (
-            "/".join(ld.get("industries") or []) or "未分类", ld.get("entity_name") or "未命名", ld.get("score", 0))
+        pri_label, pri_color = PRIORITY_LABEL.get(ld.get("priority") or "P1", PRIORITY_LABEL["P1"])
+        head = "<text_tag color='%s'>%s</text_tag> <text_tag color='neutral'>%s</text_tag> **%s** · 匹配度 %d" % (
+            pri_color, pri_label, "/".join(ld.get("industries") or []) or "未分类",
+            ld.get("entity_name") or "未命名", ld.get("score", 0))
         rules_line = "命中规则：" + "；".join(ld.get("matched_group_names") or ld.get("matched_groups") or [])
         ev_lines = [e.get("detail") for e in (ld.get("evidence") or []) if e.get("detail")][:3]
         body = rules_line + ("：" + "；".join(ev_lines) if ev_lines else "")
-        blocks.append(_block([head, body, _sources_line(ld.get("sources") or [])], color="green"))
+        els = [head, body, _sources_line(ld.get("sources") or [])]
+        pool_url = lead_pool_url(ld, view_url)
+        if pool_url:
+            els.append(_button("🔍 查看线索", pool_url, size="small"))
+        blocks.append(_block(els, color="red" if ld.get("priority") == "P0" else "green"))
     if len(leads) > limit:
         blocks.append({"tag": "markdown",
                        "content": "<font color='grey'>另有 %d 条线索</font>" % (len(leads) - limit),
@@ -215,6 +232,116 @@ def write_card(ws, name, card):
     path = os.path.join(ws, "out", name)
     core.jdump(path, card)
     return path
+
+
+# ---------- 内参卡（需求文档三段式版式：活动日历 / 行业重点新闻 / 潜在客户与业务情报） ----------
+
+# 头图与图标 img_key 复用需求文档卡片 JSON 里的既有素材（飞书 image key 租户级通用）
+BRIEFING_IMGS = {
+    "banner": "img_v3_0212n_1afbec4c-f128-436a-8e46-3f4a29fcd41g",
+    "icon": "img_v3_027m_91fb8fc2-e6a3-406c-aa9d-04569e29bccg",
+}
+LEAD_POOL_VIEW_URL = "https://webeye.feishu.cn/base/K1GrbusPBadZzws1DhjcPTionsf?table=tblIJG9zaVi1I7iM&view=vewHOTnMQa"
+
+
+def _button(content, url, btype="primary", size="small"):
+    return {"tag": "button", "text": {"tag": "plain_text", "content": content},
+            "type": btype, "width": "default", "size": size,
+            "behaviors": [{"type": "open_url", "default_url": url}]}
+
+
+def _section_heading(text):
+    return {"tag": "markdown", "content": "**%s**" % text, "text_size": "heading",
+            "margin": "16px 0px 4px 0px"}
+
+
+def _activity_elements(records, limit=3):
+    """活动日历段：judged 里 type=活动情报 且带 activity 明细的记录。
+
+    行内粗体闭合符后必须跟空格（`**时间：** 值`）：全角标点+紧贴正文会让
+    markdown 粗体失效、星号原样显示（实测陷阱）。
+    """
+    els = []
+    for r in [x for x in records if (x.get("activity") and not x.get("discard"))][:limit]:
+        a = r["activity"]
+        lines = ["**%s**" % (a.get("name") or r.get("title") or "未命名活动")]
+        if a.get("time"):
+            lines.append("**时间：** %s" % a["time"])
+        if a.get("location"):
+            lines.append("**地点：** %s" % a["location"])
+        if a.get("highlight"):
+            lines.append("**看点：** %s" % a["highlight"])
+        els.append({"tag": "markdown", "content": "\n".join(lines), "text_size": "notation"})
+        if a.get("signup_url"):
+            els.append(_button("👉 点我查看详情并报名", a["signup_url"]))
+    return els
+
+
+def _news_elements(records, limit=3):
+    """行业重点新闻段：编号红字标题 + 摘要 + 原文按钮。"""
+    els = []
+    shown = sorted([r for r in records if not r.get("discard")],
+                   key=lambda r: SIG_ORDER.get(r.get("significance"), 3))[:limit]
+    for i, r in enumerate(shown, 1):
+        els.append({"tag": "markdown",
+                    "content": "<font color='red'>**%d. %s**</font>" % (i, r.get("title") or "")})
+        if r.get("summary"):
+            els.append({"tag": "markdown", "content": r["summary"], "text_size": "notation"})
+        if r.get("url"):
+            els.append(_button("让我看看👀", r["url"]))
+    return els
+
+
+def _lead_elements(leads, limit=3, view_url=None):
+    """潜在客户段：公司名按钮 + 文档字段式描述 + 猎隼线索池登记按钮（record 级定位）。"""
+    els = []
+    for ld in [l for l in leads if l.get("priority") == "P0"][:limit] or leads[:limit]:
+        pri_label, _ = PRIORITY_LABEL.get(ld.get("priority") or "P1", PRIORITY_LABEL["P1"])
+        lines = ["**%s ｜ %s**" % (ld.get("entity_name") or "未命名", pri_label)]
+        lines.append("所属赛道：%s" % ("/".join(ld.get("industries") or []) or "待补充"))
+        if ld.get("summary"):
+            lines.append(ld["summary"])
+        if ld.get("profile"):
+            lines.append("业务描述：%s" % ld["profile"])
+        if ld.get("opportunity"):
+            lines.append("**最大机会：%s**" % ld["opportunity"])
+        els.append(_button(ld.get("entity_name") or "查看线索", ld.get("url") or LEAD_POOL_VIEW_URL,
+                           btype="danger_text", size="medium"))
+        els.append({"tag": "markdown", "content": "\n\n".join(lines), "text_size": "notation"})
+        els.append(_button("该信息已登记【猎隼线索池】，点此查看完整线索",
+                           lead_pool_url(ld, view_url or LEAD_POOL_VIEW_URL),
+                           btype="danger_filled"))
+    return els
+
+
+def briefing_card(records, leads, view_url=None):
+    """需求文档三段式内参卡。三段全空返回 None（当天无内容不产空卡）。"""
+    body = [{"tag": "img", "img_key": BRIEFING_IMGS["banner"], "preview": True,
+             "transparent": False, "scale_type": "fit_horizontal",
+             "alt": {"tag": "plain_text", "content": "市场团队内参"},
+             "corner_radius": "10px"}]
+    act_els = _activity_elements(records)
+    if act_els:
+        body.append(_section_heading("📅 WebEye活动日历"))
+        body += act_els
+    news_els = _news_elements([r for r in records if r.get("type") != "活动情报"])
+    if news_els:
+        body.append({"tag": "hr"})
+        body.append(_section_heading("🔥 行业重点新闻"))
+        body += news_els
+    lead_els = _lead_elements(leads, view_url=view_url)
+    if lead_els:
+        body.append({"tag": "hr"})
+        body.append(_section_heading("🤝 潜在客户与业务情报"))
+        body += lead_els
+    if len(body) <= 1:
+        return None
+    return {**CARD_CONFIG,
+            "header": {"title": {"tag": "plain_text", "content": "⚡️ 市场团队内参：近期热点与活动简报"},
+                       "subtitle": {"tag": "plain_text", "content": core.now_iso().replace("T", " ")[:16]},
+                       "template": "indigo",
+                       "icon": {"tag": "custom_icon", "img_key": BRIEFING_IMGS["icon"]}},
+            "body": {"direction": "vertical", "padding": "12px 12px 20px 12px", "elements": body}}
 
 
 # ---------- 主流程：judged.json 落盘 ----------
@@ -295,10 +422,12 @@ def cmd_input(ws, input_path):
             touched.add(c["owner_entity"])
 
     # 4) 规则匹配 -> 线索（对被触及的企业全量重算；确定性、可回测）
+    #    分级口径（需求文档）：任一 tier=P0 组命中即 P0（市场优先建联，实时通知）；
+    #    仅 P1 组命中为 P1（入池+日报，不实时打扰，notify_p1 可放开）。
     new_leads = []
     existing_keys = {l.get("dedupe_key") for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))}
     threshold = match_mod.threshold(rules)
-    group_at = match_mod.notify_group_at(rules)
+    notify_p1 = bool((rules.get("scoring") or {}).get("notify_p1", False))
     for eid in sorted(touched):
         fact = facts_mod.load_fact(ws, eid)
         if not fact:
@@ -307,20 +436,24 @@ def cmd_input(ws, input_path):
         if not result["matched_groups"]:
             continue
         dedupe = core.sha1(eid + "|" + ",".join(sorted(result["matched_groups"])))
+        priority = result.get("priority") or "P1"
         lead = {
             "lead_id": core.sha1(eid + "|" + now)[:12],
             "dedupe_key": dedupe,
             "entity_id": eid,
             "entity_name": fact.get("name") or eid,
             "industries": fact.get("industries") or [],
+            "priority": priority,
             "matched_groups": result["matched_groups"],
             "matched_group_names": result.get("matched_group_names") or result["matched_groups"],
             "score": result["score"],
             "evidence": result["evidence"],
             "summary": lead_summary(fact),
+            "profile": fact.get("profile"),
+            "opportunity": fact.get("opportunity"),
             "url": lead_source_url(fact),
             "sources": lead_sources(fact),
-            "notify": result["score"] >= threshold,
+            "notify": result["score"] >= threshold and (priority == "P0" or notify_p1),
             "status": "new",
             "logged_at": now,
         }
@@ -341,6 +474,7 @@ def cmd_input(ws, input_path):
                 "summary": {"new_leads": len(new_leads), "matched_entities": len(touched)}})
 
     # 5) 产卡（脚本产卡、直接发送；群卡仅高分/高优时出现）
+    view_url = (notify_cfg.get("bitable") or {}).get("view_url")
     cards = []
     if notified_intel:
         blocks, total = intel_blocks(notified_intel)
@@ -357,18 +491,19 @@ def cmd_input(ws, input_path):
                                blocks, template="red", tags=tags)
             cards.append(write_card(ws, "card-intel-%s-group.json" % stamp(), gcard))
     if new_leads:
-        group_leads = [l for l in new_leads if l["score"] >= group_at]
-        blocks = lead_blocks(new_leads)
+        p0_leads = [l for l in new_leads if l.get("priority") == "P0"]
+        blocks = lead_blocks(new_leads, view_url=view_url)
         card = build_card("潜在客户线索", core.now_iso().replace("T", " ")[:16] + " · 规则匹配命中",
                           blocks + [{"tag": "markdown",
-                                     "content": "<font color='grey'>确认后可标记状态，线索档案可按企业检索。</font>",
+                                     "content": "<font color='grey'>P0=优先建联；P1=储备线索。确认后登记猎隼线索池。</font>",
                                      "text_size": "notation"}],
-                          template="green", tags=[("%d 条线索" % len(new_leads), "green")])
+                          template="red" if p0_leads else "green",
+                          tags=[("P0×%d" % len(p0_leads), "red")] if p0_leads else [("%d 条线索" % len(new_leads), "green")])
         cards.append(write_card(ws, "card-leads-%s.json" % stamp(), card))
-        if group_leads:
-            gcard = build_card("潜在客户线索 · 高分", core.now_iso().replace("T", " ")[:16],
-                               lead_blocks(group_leads), template="green",
-                               tags=[("%d 条高分线索，请关注" % len(group_leads), "red")])
+        if p0_leads:
+            gcard = build_card("潜在客户线索 · P0 优先建联", core.now_iso().replace("T", " ")[:16],
+                               lead_blocks(p0_leads, view_url=view_url), template="red",
+                               tags=[("%d 条 P0 线索，请尽快跟进" % len(p0_leads), "red")])
             cards.append(write_card(ws, "card-leads-%s-group.json" % stamp(), gcard))
 
     # 6) 核销待判队列
@@ -443,6 +578,37 @@ def stamp():
     return time.strftime("%m%d-%H%M")
 
 
+def cmd_lead_card(ws):
+    """猎隼池写入后重产最近一轮线索卡：此时 record_id 已回写，「查看线索」可直达那条记录。
+
+    运行序：judge.py --input → --bitable --commit → --lead-card（发送这版，带跳转按钮）。
+    """
+    latest = core.jload(os.path.join(ws, "out", "leads-latest.json"), None)
+    run_ids = [l.get("lead_id") for l in (latest or {}).get("leads") or []]
+    if not run_ids:
+        raise SystemExit("[error] 最近一轮没有新线索（out/leads-latest.json 为空），无需重发")
+    by_id = {l.get("lead_id"): l for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))
+             if l.get("lead_id") in set(run_ids)}
+    leads = [by_id[i] for i in run_ids if i in by_id]
+    if not leads:
+        raise SystemExit("[error] leads.jsonl 里找不到最近一轮的线索，疑被手工清理")
+    notify_cfg = load_notify(ws)
+    view_url = (notify_cfg.get("bitable") or {}).get("view_url")
+    p0_leads = [l for l in leads if l.get("priority") == "P0"]
+    blocks = lead_blocks(leads, view_url=view_url)
+    blocks.append({"tag": "markdown",
+                   "content": "<font color='grey'>已登记猎隼线索池，点「查看线索」直达对应记录。</font>",
+                   "text_size": "notation"})
+    card = build_card("潜在客户线索", core.now_iso().replace("T", " ")[:16] + " · 已入池",
+                      blocks, template="red" if p0_leads else "green",
+                      tags=[("P0×%d" % len(p0_leads), "red")] if p0_leads
+                      else [("%d 条线索" % len(leads), "green")])
+    path = write_card(ws, "card-leads-%s.json" % stamp(), card)
+    located = sum(1 for l in leads if l.get("bitable_record_id"))
+    print("线索卡已重产: %s（%d 条中 %d 条带记录级定位，未入池的回退表视图）" % (path, len(leads), located))
+    return 0
+
+
 # ---------- 每日摘要（delta 锚点式，沿用 change-watch 的宁重勿漏） ----------
 
 def cmd_digest(ws, commit=False):
@@ -462,16 +628,26 @@ def cmd_digest(ws, commit=False):
     by_type = {}
     for r in records:
         by_type[r.get("type") or "未分类"] = by_type.get(r.get("type") or "未分类", 0) + 1
-    blocks = [_block(["**本时段市场情报 %d 条**，新线索 %d 条" % (len(records), len(leads)),
-                      "、".join("%s %d" % (k, v) for k, v in sorted(by_type.items(), key=lambda x: -x[1])) or "无"],
-                     color="blue")]
-    blocks += intel_blocks(sorted(records, key=lambda r: SIG_ORDER.get(r.get("significance"), 3))[:4])[0]
-    blocks.append({"tag": "markdown",
-                   "content": "<font color='grey'>窗口起点：%s</font>" % (anchor or "首次运行"),
-                   "text_size": "notation"})
-    card = build_card("市场情报日报", core.now_iso().replace("T", " ")[:16], blocks,
-                      tags=[("%d 条动态" % len(records), "blue"), ("%d 条新线索" % len(leads), "green")])
-    path = write_card(ws, "card-digest-%s.json" % stamp(), card)
+    # 正式版式：需求文档三段式内参卡；三段全空或渲染异常时降级 simple 版式（宁重勿漏）
+    path = None
+    view_url = ((load_notify(ws).get("bitable") or {}).get("view_url")) or LEAD_POOL_VIEW_URL
+    try:
+        card = briefing_card(records, leads, view_url=view_url)
+        if card is not None:
+            path = write_card(ws, "card-daily-%s.json" % stamp(), card)
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write("[fallback] 内参卡渲染失败，降级 simple 版式: %s\n" % exc)
+    if path is None:
+        blocks = [_block(["**本时段市场情报 %d 条**，新线索 %d 条" % (len(records), len(leads)),
+                          "、".join("%s %d" % (k, v) for k, v in sorted(by_type.items(), key=lambda x: -x[1])) or "无"],
+                         color="blue")]
+        blocks += intel_blocks(sorted(records, key=lambda r: SIG_ORDER.get(r.get("significance"), 3))[:4])[0]
+        blocks.append({"tag": "markdown",
+                       "content": "<font color='grey'>窗口起点：%s</font>" % (anchor or "首次运行"),
+                       "text_size": "notation"})
+        card = build_card("市场情报日报", core.now_iso().replace("T", " ")[:16], blocks,
+                          tags=[("%d 条动态" % len(records), "blue"), ("%d 条新线索" % len(leads), "green")])
+        path = write_card(ws, "card-digest-%s.json" % stamp(), card)
     print("摘要卡已产出: %s（发送成功后请跑 --digest --commit 推进锚点）" % path)
     return 0
 
@@ -507,8 +683,29 @@ def main():
     ap.add_argument("--digest", action="store_true", help="产出每日摘要卡（delta 窗口）")
     ap.add_argument("--commit", action="store_true", help="与 --digest 连用：推进摘要锚点")
     ap.add_argument("--status-card", action="store_true", help="产出扫描状态简报卡")
+    ap.add_argument("--bitable", action="store_true",
+                    help="把 status=new 的线索构建为猎隼线索池待写记录（预览）；加 --commit 才真正写入")
+    ap.add_argument("--lead-card", action="store_true",
+                    help="猎隼池写入后重产最近一轮线索卡（「查看线索」直达记录）")
     args = ap.parse_args()
     ws = core.workspace(args.workspace)
+    if args.lead_card:
+        raise SystemExit(cmd_lead_card(ws))
+    if args.bitable:
+        import bitable
+        cfg = (core.jload(os.path.join(ws, "notify.json"), {}) or {}).get("bitable") or {}
+        if args.commit:
+            pushed, exists, failed = bitable.commit(ws, cfg)
+            print("猎隼线索池写入完成：新增 %d、已存在跳过 %d、失败 %d" % (pushed, exists, failed))
+            raise SystemExit(0 if failed == 0 else 3)
+        items = bitable.build_pending(ws, cfg)
+        if not items:
+            print("没有待写线索（leads.jsonl 中 status=new 的已全部处理）。")
+            raise SystemExit(0)
+        for it in items:
+            print("- %s | %s" % (it["company"], json.dumps(it["record"], ensure_ascii=False)[:260]))
+        print("预览已写入 %s（共 %d 条）。确认无误后加 --commit 真正写入。" % (bitable.pending_path(ws), len(items)))
+        raise SystemExit(0)
     if args.digest:
         raise SystemExit(cmd_digest(ws, commit=args.commit))
     if args.status_card:

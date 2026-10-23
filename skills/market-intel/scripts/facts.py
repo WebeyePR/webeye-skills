@@ -88,13 +88,27 @@ def apply_fact(ws, fact, entities, now):
     # 词表里的官方信息优先；unknown 档案允许被事实补充
     if not entity_id.startswith("unknown:"):
         rec["name"] = erec.get("name") or rec.get("name")
+    # origin / going_global：词表标注 > 判断申报 > 保留既有值（只升不降，避免覆盖）
+    if erec.get("origin"):
+        rec["origin"] = erec["origin"]
+    elif fact.get("origin"):
+        rec["origin"] = fact["origin"]
+    if erec.get("going_global") is not None:
+        rec["going_global"] = bool(erec["going_global"])
+    elif fact.get("going_global"):
+        rec["going_global"] = True
+    # 词表实体的官方行业同样优先并入（判断给出的行业增量保留）
+    for ind in (erec.get("industries") or []) + (fact.get("industries") or []):
+        if ind and ind not in rec["industries"]:
+            rec["industries"].append(ind)
+    # AI 判断给出的画像与机会点（可选，供卡片与猎隼池字段使用）
+    for k in ("profile", "opportunity"):
+        if fact.get(k) and fact.get(k) != rec.get(k):
+            rec[k] = fact[k]
     rec.setdefault("aliases", [])
     for a in [fact.get("entity_name")] + list(fact.get("aliases") or []):
         if a and a not in rec["aliases"]:
             rec["aliases"].append(a)
-    for ind in fact.get("industries") or []:
-        if ind and ind not in rec["industries"]:
-            rec["industries"].append(ind)
 
     event = fact.get("event") or {}
     etype = fact.get("event_type", "other")

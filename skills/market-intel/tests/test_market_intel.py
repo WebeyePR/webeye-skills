@@ -165,6 +165,115 @@ class TestRules(unittest.TestCase):
         with self.assertRaises(SystemExit):
             match_mod.validate_rules(bad)
 
+    def test_bad_tier_rejected(self):
+        bad = json.loads(json.dumps(self.RULES))
+        bad["signal_groups"][0]["tier"] = "P5"
+        with self.assertRaises(SystemExit):
+            match_mod.validate_rules(bad)
+
+    def test_unknown_scope_dim_rejected(self):
+        bad = json.loads(json.dumps(self.RULES))
+        bad["scope"]["weather"] = {"type": "industry_tag", "any_of": ["AI"]}
+        with self.assertRaises(SystemExit):
+            match_mod.validate_rules(bad)
+
+
+class TestRulesV2(unittest.TestCase):
+    """v2 规则口径（需求文档）：三维 scope + P0/P1 分级 + 新 evaluator。"""
+    RULES = {
+        "version": 2,
+        "scope": {
+            "industry": {"type": "industry_tag", "any_of": ["游戏", "电商", "短剧"]},
+            "origin": {"type": "chinese_company"},
+            "global": {"type": "going_global"},
+        },
+        "signal_groups": [
+            {"id": "p0-funding-recent", "name": "近1月融资", "tier": "P0", "weight": 90,
+             "all_of": [{"type": "funding_event", "within_days": 30}]},
+            {"id": "p0-rank-new-entry", "name": "榜单新晋", "tier": "P0", "weight": 85,
+             "all_of": [{"type": "other_event", "kind_any": ["rank_new_entry"], "within_days": 60}]},
+            {"id": "p1-funding-180", "name": "近半年融资画像", "tier": "P1", "weight": 60,
+             "all_of": [{"type": "funding_event", "within_days": 180}]},
+        ],
+        "scoring": {"threshold": 60, "extra_group_bonus": 10},
+    }
+    NOW = core.now_iso()
+
+    def _fact(self, **kw):
+        base = {"industries": ["游戏"], "origin": "CN", "going_global": True,
+                "funding_events": [{"date": self.NOW, "round": "A轮", "amount_text": "5000万元"}]}
+        base.update(kw)
+        return base
+
+    def test_p0_priority_and_groups(self):
+        r = match_mod.evaluate_entity(self._fact(), self.RULES)
+        self.assertEqual(set(r["matched_groups"]), {"p0-funding-recent", "p1-funding-180"})
+        self.assertEqual(r["priority"], "P0")
+
+    def test_p1_when_only_profile_groups(self):
+        fact = self._fact(funding_events=[{"date": "2026-06-01T00:00:00+08:00",
+                                           "round": "天使轮", "amount_text": "1000万元"}])
+        r = match_mod.evaluate_entity(fact, self.RULES)
+        self.assertEqual(r["matched_groups"], ["p1-funding-180"])
+        self.assertEqual(r["priority"], "P1")
+
+    def test_other_event_rank_entry(self):
+        fact = self._fact(funding_events=[],
+                          other_events=[{"kind": "rank_new_entry", "detail": "新晋 AI产品榜 Top10",
+                                         "extracted_at": self.NOW}])
+        r = match_mod.evaluate_entity(fact, self.RULES)
+        self.assertIn("p0-rank-new-entry", r["matched_groups"])
+
+    def test_scope_blocks_foreign_company(self):
+        """非中国企业（origin 未申报且无启发式证据）：画像再好也不命中（需求文档硬筛）。"""
+        fact = {"industries": ["游戏"], "funding_events": [{"date": self.NOW, "round": "B轮",
+                                                           "amount_text": "$30B"}]}
+        r = match_mod.evaluate_entity(fact, self.RULES)
+        self.assertEqual(r["matched_groups"], [])
+
+    def test_chinese_heuristics_cny(self):
+        """无显式 origin，人民币融资兜底判中。"""
+        fact = {"industries": ["游戏"], "going_global": True,
+                "funding_events": [{"date": self.NOW, "round": "A轮", "amount_text": "数千万元人民币"}]}
+        r = match_mod.evaluate_entity(fact, self.RULES)
+        self.assertNotEqual(r["matched_groups"], [])
+
+    def test_going_global_keyword_fallback(self):
+        """无显式 going_global，事件文本含出海关键词兜底判中。"""
+        fact = {"industries": ["电商"], "origin": "CN",
+                "funding_events": [{"date": self.NOW, "round": "A轮", "amount_text": "1亿元"}],
+                "other_events": [{"kind": "business_surge", "detail": "海外站点订单暴增3倍",
+                                  "extracted_at": self.NOW}]}
+        r = match_mod.evaluate_entity(fact, self.RULES)
+        self.assertEqual(r["priority"], "P0")
+
+
+class TestParseWebPage(unittest.TestCase):
+    """web_page 两种模式：keywords（招聘页）与 links（资讯列表/榜单页，新出现=added）。"""
+
+    SPEC = {"url": "https://www.example.com/", "config": {"mode": "links",
+                                                          "link_pattern": r"example\.com/(p|t)/\w+"}}
+    BODY = """<html><body>
+      <a href="/p/101.html">第一篇文章标题足够长</a>
+      <a href="https://www.example.com/t/abcDEF">第二篇文章的标题也很长</a>
+      <a href="/p/101.html">第一篇文章标题足够长</a>
+      <a href="https://other.com/x">外部链接不算</a>
+      <a href="/more">更多</a>
+      <a href="javascript:void(0)">按钮文字</a>
+    </body></html>"""
+
+    def test_links_mode_dedupe_and_filter(self):
+        entries = collect.parse_web_page(self.BODY, self.SPEC)
+        keys = [e["key"] for e in entries]
+        self.assertEqual(len(keys), 2, "去重 + 域过滤后应剩 2 条")
+        self.assertTrue(all(k.startswith("http") for k in keys))
+        self.assertEqual(entries[0]["title"], "第一篇文章标题足够长")
+
+    def test_keywords_mode_still_works(self):
+        spec = {"url": "https://c.com/jobs", "config": {"keywords": ["大模型"]}}
+        entries = collect.parse_web_page("<html>我们在招大模型工程师</html>", spec)
+        self.assertEqual([e["key"] for e in entries], ["kw:大模型"])
+
 
 class TestDiff(unittest.TestCase):
     def _e(self, key, pub):
@@ -206,11 +315,11 @@ class TestEndToEnd(unittest.TestCase):
         with tempfile.TemporaryDirectory() as ws:
             core.workspace(ws)
             core.jdump(os.path.join(ws, "rules.json"),
-                       json.loads(open(os.path.join(core.SCRIPT_DIR, "..", "config",
-                                                    "rules.json.example"), encoding="utf-8").read()))
+                       core.jload(os.path.join(core.SCRIPT_DIR, "..", "config",
+                                               "rules.json.example"), None))
             core.jdump(os.path.join(ws, "entities.json"),
-                       json.loads(open(os.path.join(core.SCRIPT_DIR, "..", "config",
-                                                    "entities.json.example"), encoding="utf-8").read()))
+                       core.jload(os.path.join(core.SCRIPT_DIR, "..", "config",
+                                               "entities.json.example"), None))
             core.jdump(os.path.join(ws, "notify.json"),
                        {"version": 1, "notify": {"user_id": "", "chat_id": "", "mention": "all"}})
             latest = {"run_at": core.now_iso(), "health": {}, "summary": {},
@@ -246,13 +355,180 @@ class TestEndToEnd(unittest.TestCase):
             self.assertEqual(len(fact["funding_events"]), 1)
             leads = core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))
             self.assertEqual(len(leads), 1)
-            self.assertIn("major-funding", leads[0]["matched_groups"])
+            # v2 口径：月之暗面（词表 origin=CN/going_global）今日 B 轮融资 → P0 双组命中
+            self.assertIn("p0-funding-recent", leads[0]["matched_groups"])
+            self.assertEqual(leads[0]["priority"], "P0")
             self.assertGreaterEqual(leads[0]["score"], 60)
+            self.assertTrue(leads[0]["notify"])
             # 卡片与待判核销
             self.assertEqual(len([f for f in os.listdir(os.path.join(ws, "out"))
                                   if f.startswith("card-")]) >= 2, True)
             pending = core.jload(diffcore.pending_path(ws), {"items": []})
             self.assertEqual(pending["items"], [])
+
+
+class TestBitable(unittest.TestCase):
+    """猎隼线索池写入预设：轮次归一 / 标签映射 / 记录构建。"""
+
+    OPTIONS = {
+        "所属赛道": {"AI应用", "内容创作", "具身智能", "AI基础设施", "AI硬件"},
+        "标签细分": {"游戏", "电商", "短剧", "硬件", "AIGC", "机器人", "制造", "北美", "东南亚", "欧洲"},
+        "融资动态": {"种子轮", "天使轮", "Pre-A轮", "A轮", "A+轮", "B轮", "战略融资", "未融资"},
+    }
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        import bitable
+        self.bitable = bitable
+        self.cfg = {
+            "app_token": "x", "table_id": "x", "enabled": True,
+            "default_status": "未跟进",
+            "field_map": {"company": "公司名称", "desc": "一句话业务描述", "track": "所属赛道",
+                          "tags": "标签细分", "round": "融资动态", "investors": "背后资方/投资机构",
+                          "media": "曝光媒体/合作渠道", "gcp": "GCP切入点", "status": "跟进状态",
+                          "captured_at": "抓取时间", "website": "官网链接"},
+            "maps": {
+                "industry_to_track": {"游戏": "内容创作", "应用": "AI应用", "AI硬件": "AI硬件"},
+                "industry_to_tags": {"游戏": "游戏", "电商": "电商", "AI硬件": "硬件", "互联网": None,
+                                     "_regions": {"北美": "美国|TikTok", "东南亚": "印尼|东南亚"}},
+                "source_to_media": {"品牌方舟": "品牌方舟", "白鲸出海": "白鲸出海", "TechCrunch": None},
+            },
+        }
+
+    def test_norm_round(self):
+        f = self.bitable.norm_round
+        self.assertEqual(f("A+"), "A+轮")
+        self.assertEqual(f("pre-A"), "Pre-A轮")
+        self.assertEqual(f("B轮"), "B轮")
+        self.assertEqual(f("战略"), "战略融资")
+        self.assertEqual(f("天使"), "天使轮")
+        self.assertIsNone(f(""))
+        self.assertIsNone(f("C3轮不准的", {"B轮"}))  # 不在选项则拒绝
+
+    def test_map_tags_regions(self):
+        tags = self.bitable.map_tags(
+            ["游戏", "互联网"], "TikTok 在美国的下载量暴涨", self.cfg["maps"]["industry_to_tags"],
+            self.OPTIONS["标签细分"])
+        self.assertIn("游戏", tags)
+        self.assertIn("北美", tags)
+        self.assertNotIn("互联网", tags)
+
+    def test_build_record(self):
+        import datetime as dt
+        lead = {
+            "entity_name": "点点互动", "industries": ["游戏"], "score": 80,
+            "summary": "二合新游上线", "url": "http://x/a",
+            "sources": [{"name": "白鲸出海", "url": "http://x/a"}],
+            "evidence": [{"detail": "发布新游", "group": "p0"}],
+            "logged_at": "2026-10-23T18:00:00+08:00",
+        }
+        fact = {"profile": "出海游戏厂商", "opportunity": "买量与云成本",
+                "funding_events": [{"round": "A+", "investors": "腾讯", "date": "2026-09-01"}]}
+        rec = self.bitable.build_record(lead, fact, self.cfg, options=self.OPTIONS)
+        self.assertEqual(rec["公司名称"], "点点互动")
+        self.assertEqual(rec["所属赛道"], ["内容创作"])
+        self.assertEqual(rec["标签细分"], ["游戏"])
+        self.assertEqual(rec["融资动态"], ["A+轮"])
+        self.assertEqual(rec["背后资方/投资机构"], "腾讯")
+        self.assertEqual(rec["跟进状态"], ["未跟进"])
+        self.assertEqual(rec["GCP切入点"], "买量与云成本")
+        self.assertTrue(rec["官网链接"].startswith("[暂无官网(新闻报道)](http://x/a)"))
+        self.assertIsInstance(rec["抓取时间"], int)
+        # 选项约束：无效标签被剔除
+        lead["industries"] = ["互联网"]
+        rec2 = self.bitable.build_record(lead, {}, self.cfg, options=self.OPTIONS)
+        self.assertNotIn("标签细分", rec2)
+        self.assertNotIn("所属赛道", rec2)
+
+
+class TestEnrichment(unittest.TestCase):
+    """AI 调研补全（log/enrichments.jsonl）：fields 合并进记录、select 过选项校验、空值不写。"""
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        import bitable
+        self.bitable = bitable
+        self.cfg = {"field_map": {}, "default_status": "未跟进"}
+        self.opts = {"企业规模": {"10-99", "未公开"}, "成立年限": {"2023年", "未公开"},
+                     "所在城市/区域": {"深圳", "北京"}}
+
+    def test_apply_enrichment_merges_and_validates(self):
+        rec = {"公司名称": "X", "所属赛道": ["AI应用"]}
+        enr = {"tech_stack": "智谱AI", "ceo": "张三 (创始人)", "size": "10-99",
+               "founded": "2023年", "city": ["深圳", "火星"], "contact": "x@x.ai",
+               "icebreaker": "您好，祝贺……", "website": "https://x.ai",
+               "investors": "红杉中国"}
+        self.bitable.apply_enrichment(rec, {}, self.cfg, enr, options=self.opts)
+        self.assertEqual(rec["技术底座"], "智谱AI")
+        self.assertEqual(rec["CEO/高管姓名"], "张三 (创始人)")
+        self.assertEqual(rec["企业规模"], ["10-99"])
+        self.assertEqual(rec["成立年限"], ["2023年"])
+        self.assertEqual(rec["所在城市/区域"], ["深圳"], "非法城市选项必须丢弃")
+        self.assertEqual(rec["联系方式(LinkedIn/邮箱)"], "x@x.ai")
+        self.assertEqual(rec["打单破冰话术"], "您好，祝贺……")
+        self.assertEqual(rec["背后资方/投资机构"], "红杉中国")
+        self.assertEqual(rec["官网链接"], "[官网](https://x.ai)")
+
+    def test_apply_enrichment_none_noop(self):
+        rec = {"公司名称": "X"}
+        self.bitable.apply_enrichment(rec, {}, self.cfg, None)
+        self.assertEqual(rec, {"公司名称": "X"})
+
+    def test_apply_enrichment_bad_select_dropped(self):
+        rec = {}
+        enr = {"size": "一百人", "city": "北京"}
+        self.bitable.apply_enrichment(rec, {}, self.cfg, enr, options=self.opts)
+        self.assertNotIn("企业规模", rec)
+        self.assertEqual(rec["所在城市/区域"], ["北京"])
+
+    def test_load_enrichments_latest_wins(self):
+        with tempfile.TemporaryDirectory() as ws:
+            core.workspace(ws)
+            log = os.path.join(ws, "log", "enrichments.jsonl")
+            with open(log, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"entity_id": "a", "fields": {"ceo": "旧"}}, ensure_ascii=False) + "\n")
+                f.write(json.dumps({"entity_id": "a", "fields": {"ceo": "新"}}, ensure_ascii=False) + "\n")
+                f.write(json.dumps({"entity_id": "b", "fields": {"size": "10-99"}}, ensure_ascii=False) + "\n")
+            out = self.bitable.load_enrichments(ws)
+            self.assertEqual(out["a"]["ceo"], "新")
+            self.assertEqual(out["b"]["size"], "10-99")
+
+
+class TestLeadCardJump(unittest.TestCase):
+    """线索卡「查看线索」跳转：record 级定位 + 回退表视图 + 活动行粗体渲染。"""
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+
+    def test_lead_pool_url(self):
+        view = "https://webeye.feishu.cn/base/x?table=t&view=v"
+        self.assertEqual(judge.lead_pool_url({"bitable_record_id": "rec1"}, view),
+                         view + "&record=rec1")
+        self.assertEqual(judge.lead_pool_url({}, view), view)
+        self.assertIsNone(judge.lead_pool_url({}, None))
+
+    def test_lead_blocks_has_view_button(self):
+        leads = [{"entity_name": "深言科技", "industries": ["AI"], "priority": "P0",
+                  "score": 90, "matched_group_names": ["p0-funding-recent"],
+                  "evidence": [{"detail": "近期融资"}],
+                  "sources": [{"name": "量子位", "url": "https://q/1"}],
+                  "bitable_record_id": "rec9"}]
+        blocks = judge.lead_blocks(leads, view_url="https://x/base?table=t&view=v")
+        btns = [e for b in blocks for e in (b.get("elements") or [])
+                if isinstance(e, dict) and e.get("tag") == "button"]
+        self.assertTrue(btns, "每条线索来源旁必须有查看线索按钮")
+        self.assertEqual(btns[0]["behaviors"][0]["default_url"],
+                         "https://x/base?table=t&view=v&record=rec9")
+        self.assertIn("查看线索", btns[0]["text"]["content"])
+
+    def test_activity_bold_renders(self):
+        recs = [{"type": "活动情报", "activity": {"name": "WAIC 2026", "time": "2026-11-01",
+                                                 "location": "上海", "highlight": "出海论坛"}}]
+        els = judge._activity_elements(recs)
+        content = els[0]["content"]
+        self.assertIn("**时间：** ", content, "闭合粗体后必须跟空格，否则星号原样显示")
+        self.assertIn("**地点：** ", content)
+        self.assertIn("**看点：** ", content)
 
 
 if __name__ == "__main__":

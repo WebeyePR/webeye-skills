@@ -2,17 +2,20 @@
 
 ## 语义
 
-**命中 = scope 成立 AND（任一 signal_group 成立）**
+**命中 = scope 全维成立 AND（任一 signal_group 成立）**
 
 ```text
-第一层 scope          域限定：所有组共享的硬前提（当前=行业 any_of）
+第一层 scope          多维域限定（维度间 AND），所有组共享的硬前提：
+                      industry（八行业 any_of）/ origin（中国企业）/ global（业务出海）
                       —— 组间条件耦合的唯一书写位置，禁止复制进组里
-第二层 signal_groups  信号组：组间 OR（满足任一组即命中），组内 all_of 是 AND
+第二层 signal_groups  信号组：组间 OR（满足任一组即命中），组内 all_of 是 AND。
+                      tier=P0 的组任一命中 → 线索分级 P0（优先建联、实时通知）；
+                      仅 P1 组命中 → P1（入池 + 日报，不实时打扰）
 第三层 scoring        评分：score = 命中组最高 weight + 每多一组 extra_group_bonus
-                      threshold 只决定"通知谁"，不做硬淘汰（一期宽松 + 人工确认）
+                      threshold 只决定"通知谁"，不做硬淘汰（宽松 + 人工确认）
 ```
 
-为什么耦合条件必须只写一处：把"AI/电商/游戏行业"复制进每个组，将来加行业要改 N 处，
+为什么耦合条件必须只写一处：把"八行业/中国企业/出海"复制进每个组，将来加行业要改 N 处，
 漏一处就是规则漏洞。scope 继承让规则加组、加行业都只动一个地方。
 
 ## 信号类型（evaluator 注册制）
@@ -22,6 +25,9 @@
 | `industry_tag` | `any_of` | `industries[]` |
 | `funding_event` | `within_days` / `min_amount_cny` / `round_any` | `funding_events[]` |
 | `hiring` | `within_days` / `keywords_any` | `hiring_signals[]` |
+| `other_event` | `kind_any` / `within_days` / `keywords_any` | `other_events[]`（kind: business_surge / product_launch / rank_new_entry…） |
+| `chinese_company` | —（scope 用） | `origin=CN`，兜底启发式（人民币融资/公司主体词/城市词） |
+| `going_global` | —（scope 用） | `going_global=true`，兜底关键词扫描（出海/跨境/全球化/海外） |
 
 新增信号类型：在 `scripts/match.py` 加一个 `@evaluator("xxx")` 函数 +
 `KNOWN_EVALUATORS` 登记 + 配置里即可使用。求值只读档案，不碰网络、不调模型。

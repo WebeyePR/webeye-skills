@@ -21,7 +21,7 @@ import re
 import threading
 import time
 import xml.etree.ElementTree as ET
-from urllib.parse import urlparse
+from urllib.parse import urljoin as _urljoin, urlparse
 
 import core
 
@@ -120,11 +120,29 @@ def parse_feed(body):
 
 # ---------- 页面监测 ----------
 
+_ANCHOR_RE = re.compile(r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.I | re.S)
+
+
 def parse_web_page(body, spec):
-    """按关键词出现与否产出条目：出现 -> 一条（added 语义），消失 -> 该键缺席（removed 语义）。"""
+    """页面监测，两种模式（spec.config.mode）：
+
+    - keywords（默认）：关键词出现/消失（官网招聘页场景，key=kw:关键词）；
+    - links：提取页面里的文章/条目链接做差分（资讯列表页/榜单页场景）。
+      "基线有、本轮新出现" = added，天然实现"排除霸榜、只看新上榜"的榜单语义。
+      config: link_pattern（href 过滤正则，可选）、max_items（上限，默认 60）、
+      title_min_len（锚文本最短长度，过滤"更多"类噪音，默认 6）。
+    """
+    cfg = spec.get("config") or {}
+    mode = cfg.get("mode") or "keywords"
+    if mode == "links":
+        return _page_links(body, spec, cfg)
+    return _page_keywords(body, spec, cfg)
+
+
+def _page_keywords(body, spec, cfg):
     text = core.norm(core.strip_tags(body)).lower()
     entries = []
-    for kw in (spec.get("config") or {}).get("keywords") or []:
+    for kw in cfg.get("keywords") or []:
         if not kw:
             continue
         if kw.lower() in text:
@@ -136,6 +154,36 @@ def parse_web_page(body, spec):
                 "summary": "关键词「%s」在页面中出现" % kw,
                 "text": kw,
             })
+    return entries
+
+
+def _page_links(body, spec, cfg):
+    """links 模式：锚点 -> 条目（key=规范化 URL，title=锚文本）。"""
+    pattern = re.compile(cfg["link_pattern"]) if cfg.get("link_pattern") else None
+    base = spec.get("url") or ""
+    min_title = int(cfg.get("title_min_len", 6))
+    max_items = int(cfg.get("max_items", 60))
+    seen, entries = set(), []
+    for href, anchor_html in _ANCHOR_RE.findall(body):
+        href = (href or "").strip()
+        if href.startswith(("javascript:", "#", "mailto:", "tel:")):
+            continue
+        link = _urljoin(base, href)
+        if not link.startswith("http"):
+            continue
+        key = core.norm_url(link)
+        if not key or key in seen:
+            continue
+        if pattern and not pattern.search(link):
+            continue
+        title = core.norm(core.strip_tags(anchor_html))
+        if len(title) < min_title:
+            continue
+        seen.add(key)
+        entries.append({"key": key, "title": title, "link": link, "published": None,
+                        "summary": "", "text": title})
+        if len(entries) >= max_items:
+            break
     return entries
 
 

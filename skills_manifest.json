@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Webeye CSBU AI Skills 全局技能元数据注册表",
-  "generated_at": "2026-10-23 16:38:17",
+  "generated_at": "2026-10-23 17:51:05",
   "total_skills": 16,
   "skills": [
     {
@@ -350,8 +350,8 @@
       "path": "skills/market-intel",
       "has_skill_md": true,
       "title": "market-intel（市场情报雷达）",
-      "description": "监控市场情报并发现潜在客户。两大能力：① 行业最新动态监控——持续抓取行业媒体/公众号/官网渠道， 差分出新内容，AI 判断后产出飞书情报简报与每日日报；② 潜在客户企业发现——把融资事件、招聘信号等 事实聚合到企业档案，按\"域限定 + 信号组\"规则（当前：AI/电商/游戏行业内，近期融资、正在招聘、 大额融资）确定性匹配打分，高分线索飞书推送并可落多维表格（二期激活）。适用于：\"最近 AI/电商/游戏 行业有什么动态\"、\"帮我盯正在融资、在招算法岗的公司\"、\"这类线索定时推给我\"、\"某家公司我们 档案里有什么信息\"。触发举例：\"市场情报简报\"、\"发现了哪些潜在客户\"、\"把某公司加入监控\"。",
-      "version": "0.1.0",
+      "description": "监控市场情报并发现潜在客户（需求源：市场情报内参闭环需求文档）。四大版块：① 潜在客户挖取—— 把融资/招聘/业务暴增/榜单新晋等事实聚合到企业档案，按\"三维域限定（八行业+中国企业+业务出海） + P0/P1 信号组\"确定性匹配，P0（近1月融资/近3月业务暴增/新品发布/榜单新晋任一）优先建联推送， P1 入池进日报；② 重点资讯情报——Gemini 竞对模型/价格、Google Cloud、八行业趋势； ③ 活动情报——B2B 出海活动白名单筛选；④ 每日内参——需求文档三段式卡片（活动日历/行业重点新闻/ 潜在客户与业务情报），确认线索对接「猎隼线索池」多维表格（预设待权限校准）。适用于：\"最近八行业 有什么动态\"、\"帮我盯种子到B轮刚融资的出海公司\"、\"这类线索定时推给我\"。触发举例：\"市场情报简报\"、 \"发现了哪些潜在客户\"、\"把某公司加入监控\"。",
+      "version": "0.2.0",
       "author": "Webeye CSBU Team",
       "license": "MIT",
       "alwaysActive": false,
@@ -376,7 +376,8 @@
         "references/lead-criteria.md",
         "references/sources-guide.md",
         "references/rules-guide.md",
-        "references/intel-criteria.md"
+        "references/intel-criteria.md",
+        "references/activities-criteria.md"
       ],
       "tests": [
         "tests/test_market_intel.py",
@@ -385,8 +386,8 @@
       "has_env_example": true,
       "has_requirements": false,
       "has_package_json": false,
-      "total_files": 25,
-      "total_lines": 2586
+      "total_files": 26,
+      "total_lines": 3590
     },
     {
       "name": "webeye-kb-organizer",
