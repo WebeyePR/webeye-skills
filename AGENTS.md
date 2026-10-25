@@ -77,6 +77,16 @@ reusability: 高                 # 选填：高 | 中 | 低 (默认：高)
 
 ---
 
+## 🖥️ 3.5 本地基础设施 (Local Infrastructure)
+
+技能依赖的本机服务在此登记，AI 处理相关技能前应先确认服务状态，**不要假设服务永远在线**。
+
+| 服务 | 地址 | 依赖技能 | 说明 |
+| :--- | :--- | :--- | :--- |
+| RSSHub（Docker 容器 `rsshub`） | `http://127.0.0.1:1200` | market-intel 等 RSS 类采集技能 | 官方镜像 `diygod/rsshub:latest`，缓存 1h，重启策略 `unless-stopped`。**版本更新频繁**，排障与升级前先查上游 release；**全部路由（含首页）突然 502 = macOS 的 Docker Desktop 未运行**（`open -a Docker` 启动后容器自动拉起，勿误判为路由故障）。部署方式、已核实渠道清单与地址配置见 `skills/market-intel/references/rsshub-sources.md` |
+
+---
+
 ## 🛑 4. 核心安全红线与治理原则 (Guardrails & Governance)
 
 1. **🔒 范围隔离原则 (Scope Isolation)**
