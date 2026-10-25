@@ -22,6 +22,47 @@ import diffcore  # noqa: E402
 import facts as facts_mod  # noqa: E402
 import judge  # noqa: E402
 import match as match_mod  # noqa: E402
+import pipeline  # noqa: E402
+
+
+class TestLoadSources(unittest.TestCase):
+    """sources.json 加载：rsshub:// 地址拼装与默认值兜底。"""
+
+    @staticmethod
+    def _write_sources(ws, settings, sources):
+        core.workspace(ws)
+        core.jdump(os.path.join(ws, "rules.json"),
+                   core.jload(os.path.join(core.SCRIPT_DIR, "..", "config", "rules.json.example"), None))
+        core.jdump(os.path.join(ws, "sources.json"),
+                   {"version": 1, "settings": settings, "sources": sources})
+
+    def test_rsshub_prefix_resolved_from_settings(self):
+        """rsshub:// 前缀按 settings.rsshub_base 拼装——部署迁移只改一处。"""
+        with tempfile.TemporaryDirectory() as ws:
+            self._write_sources(
+                ws,
+                {"rsshub_base": "http://10.0.0.5:1200/"},
+                [{"id": "cls", "name": "财联社", "kind": "rss", "url": "rsshub://cls/telegraph",
+                  "enabled": True, "serves": ["intel"], "tier": "T2", "owner_entity": None,
+                  "tags": [], "windowed": True, "stale_after_hours": 72}])
+            sources, settings = pipeline.load_sources(ws)
+            self.assertEqual(sources[0]["url"], "http://10.0.0.5:1200/cls/telegraph")
+
+    def test_rsshub_default_base(self):
+        """未配置 rsshub_base 时用默认本地地址，行为与历史配置一致。"""
+        with tempfile.TemporaryDirectory() as ws:
+            self._write_sources(
+                ws, {},
+                [{"id": "kr", "name": "36氪快讯", "kind": "rss", "url": "rsshub://36kr/newsflashes",
+                  "enabled": True, "serves": ["intel"], "tier": "T2", "owner_entity": None,
+                  "tags": [], "windowed": True, "stale_after_hours": 168},
+                 {"id": "web", "name": "某页面", "kind": "web_page", "url": "https://example.com/a",
+                  "enabled": True, "serves": ["intel"], "tier": "T2", "owner_entity": None,
+                  "tags": [], "windowed": True, "stale_after_hours": 168}])
+            sources, _ = pipeline.load_sources(ws)
+            by_id = {s["id"]: s["url"] for s in sources}
+            self.assertEqual(by_id["kr"], "http://127.0.0.1:1200/36kr/newsflashes")
+            self.assertEqual(by_id["web"], "https://example.com/a")  # 非 rsshub:// 原样保留
 
 
 class TestParseFeed(unittest.TestCase):

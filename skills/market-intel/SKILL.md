@@ -9,7 +9,7 @@ description: >-
   潜在客户与业务情报），确认线索对接「猎隼线索池」多维表格（预设待权限校准）。适用于："最近八行业
   有什么动态"、"帮我盯种子到B轮刚融资的出海公司"、"这类线索定时推给我"。触发举例："市场情报简报"、
   "发现了哪些潜在客户"、"把某公司加入监控"。
-version: 0.2.4
+version: 0.2.5
 author: Webeye CSBU Team
 license: MIT
 alwaysActive: false
@@ -52,7 +52,7 @@ AIHOT 的词表与 tier 概念。**字段与结构能继承的一律继承，不
 
 | 路径 | 内容 |
 |---|---|
-| `sources.json` | 公共源登记册（两个需求共用，`serves` 标记 intel/lead） |
+| `sources.json` | 公共源登记册（两个需求共用，`serves` 标记 intel/lead）。RSSHub 类源用 `rsshub://路由` 写法，部署地址统一在 `settings.rsshub_base` 一处改；已核实渠道清单、部署与排错见 `references/rsshub-sources.md` |
 | `entities.json` | 企业与行业词表（entity 归一依据，沿用 AIHOT 词表思路） |
 | `rules.json` | 线索规则（三层模型，改规则不改代码） |
 | `notify.json` | 通知目标（飞书 user_id/chat_id/mention）+ 猎隼池写入预设（bitable，已实装） |
@@ -290,6 +290,7 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
 ## 资源
 
 - `config/sources.json.example` —— 公共源登记册模板（字段说明见 `references/sources-guide.md`）
+- `references/rsshub-sources.md` —— 本地 RSSHub 部署/地址管理/已核实渠道清单与排错（动 RSSHub 相关配置前必读）
 - `config/entities.json.example` —— 企业与行业词表模板
 - `config/rules.json.example` —— 线索规则模板（三层模型见 `references/rules-guide.md`）
 - `config/notify.json.example` —— 通知目标与多维表格预设

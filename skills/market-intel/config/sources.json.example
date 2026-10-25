@@ -9,7 +9,9 @@
     "collect_concurrency": 6,
     "host_concurrency": 2,
     "collect_wall_clock_seconds": 300,
-    "_comment_concurrency": "并发采集约束沿用 change-watch：collect_concurrency=全局线程数，host_concurrency=同域名并发上限，collect_wall_clock_seconds=整轮壁钟上限。排查时把 collect_concurrency 设为 1 退回串行。"
+    "_comment_concurrency": "并发采集约束沿用 change-watch：collect_concurrency=全局线程数，host_concurrency=同域名并发上限，collect_wall_clock_seconds=整轮壁钟上限。排查时把 collect_concurrency 设为 1 退回串行。",
+    "rsshub_base": "http://127.0.0.1:1200",
+    "_comment_rsshub": "RSSHub 自部署地址（rsshub:// 前缀的源都在此拼装）。部署迁移/换端口只改这一处。部署与渠道知识见 references/rsshub-sources.md。"
   },
   "sources": [
     {
@@ -100,8 +102,8 @@
       "id": "36kr-newsflashes",
       "name": "36氪快讯（RSSHub 自部署）",
       "kind": "mp_account",
-      "url": "http://127.0.0.1:1200/36kr/newsflashes",
-      "enabled": true,
+      "url": "rsshub://36kr/newsflashes",
+      "enabled": false,
       "serves": [
         "intel",
         "lead"
@@ -115,7 +117,7 @@
       ],
       "windowed": true,
       "stale_after_hours": 72,
-      "notes": "2026-10-23 实测路由 /36kr/newsflashes 可用（注意不是 newsflights）。36氪原生 RSS 已失效，此条依赖自部署 RSSHub：把 url 换成实际实例地址后把 enabled 改 true。融资快讯主力信源。"
+      "notes": "实测可用（2026-10-24），最新条目约 60 分钟（RSSHub 缓存 1h 边界）。【默认禁用：依赖本地 RSSHub 部署】本机已部署（地址见 settings.rsshub_base）的可改 true；部署与渠道知识见 references/rsshub-sources.md。"
     },
     {
       "id": "baijing-feed",
@@ -290,7 +292,7 @@
       ],
       "windowed": true,
       "stale_after_hours": 336,
-      "notes": "微信公众号采集依赖搜狗通道，时灵时不灵：必须低频轮询（建议 >=120 分钟），失败会显式报错而非静默空结果。作为线索发现的补充源，不作为唯一信源。"
+      "notes": "不可用（2026-10-24 核实）：wechat/uread 路由依赖的免费中转 careerengine.us 已 404。恢复途径见 references/rsshub-sources.md 微信路由一节（wechat2rss 公共版未收录 IT桔子 / 自部署 wewe-rss 需扫码占用微信号）。"
     },
     {
       "id": "example-company-careers",
@@ -317,6 +319,144 @@
         ]
       },
       "notes": "官网招聘页差分：config.keywords 里列出的关键词在页面出现/消失时各产出一条变更（岗位新增/下线是最强的业务扩张信号）。owner_entity 指向词表里的公司，档案直接归到它名下。示例域名为占位，使用时替换为真实目标公司招聘页。"
+    },
+    {
+      "id": "cls-telegraph",
+      "name": "财联社电报",
+      "kind": "rss",
+      "url": "rsshub://cls/telegraph",
+      "enabled": false,
+      "serves": [
+        "intel",
+        "lead"
+      ],
+      "tier": "T2",
+      "owner_entity": null,
+      "tags": [
+        "快讯",
+        "财经",
+        "公司公告"
+      ],
+      "windowed": true,
+      "stale_after_hours": 72,
+      "notes": "2026-10-24 实测可用，时效 2 分钟级（8 源中最好）。公司公告/产能/融资动态密度高；与华尔街见闻、格隆汇快讯内容重叠，三者启用其一即可。"
+    },
+    {
+      "id": "wallstreetcn-live",
+      "name": "华尔街见闻·全球直播",
+      "kind": "rss",
+      "url": "rsshub://wallstreetcn/live/global",
+      "enabled": false,
+      "serves": [
+        "intel",
+        "lead"
+      ],
+      "tier": "T2",
+      "owner_entity": null,
+      "tags": [
+        "快讯",
+        "财经",
+        "科技"
+      ],
+      "windowed": true,
+      "stale_after_hours": 72,
+      "notes": "2026-10-24 实测可用，时效 1 分钟，单轮 100 条容量最大。含消费电子等科技动态；与财联社重叠，与 cls-telegraph 二选一。"
+    },
+    {
+      "id": "wallstreetcn-news",
+      "name": "华尔街见闻·新闻",
+      "kind": "rss",
+      "url": "rsshub://wallstreetcn/news",
+      "enabled": false,
+      "serves": [
+        "intel"
+      ],
+      "tier": "T3",
+      "owner_entity": null,
+      "tags": [
+        "财经",
+        "文章"
+      ],
+      "windowed": true,
+      "stale_after_hours": 168,
+      "notes": "2026-10-24 实测可用，时效 6 分钟。与 live 版重叠，优先 live 版。"
+    },
+    {
+      "id": "gelonghui-live",
+      "name": "格隆汇·直播",
+      "kind": "rss",
+      "url": "rsshub://gelonghui/live",
+      "enabled": false,
+      "serves": [
+        "intel"
+      ],
+      "tier": "T3",
+      "owner_entity": null,
+      "tags": [
+        "快讯",
+        "港股"
+      ],
+      "windowed": true,
+      "stale_after_hours": 72,
+      "notes": "2026-10-24 实测可用，时效 0 分钟。港股/公司动态；与财联社重叠度最高，不建议与前两者同开。"
+    },
+    {
+      "id": "huxiu-article",
+      "name": "虎嗅·文章",
+      "kind": "rss",
+      "url": "rsshub://huxiu/article",
+      "enabled": false,
+      "serves": [
+        "intel"
+      ],
+      "tier": "T3",
+      "owner_entity": null,
+      "tags": [
+        "媒体",
+        "商业",
+        "消费"
+      ],
+      "windowed": true,
+      "stale_after_hours": 168,
+      "notes": "2026-10-24 实测可用，时效 5 分钟。商业深度文，消费品牌/出海案例与画像有关。"
+    },
+    {
+      "id": "caixin-latest",
+      "name": "财新·最新",
+      "kind": "rss",
+      "url": "rsshub://caixin/latest",
+      "enabled": false,
+      "serves": [
+        "intel"
+      ],
+      "tier": "T3",
+      "owner_entity": null,
+      "tags": [
+        "媒体",
+        "财经"
+      ],
+      "windowed": true,
+      "stale_after_hours": 168,
+      "notes": "2026-10-24 实测可用，时效 31 分钟。财经深度但 AI/出海密度低，画像弱，低优先级。"
+    },
+    {
+      "id": "sspai-matrix",
+      "name": "少数派·矩阵",
+      "kind": "rss",
+      "url": "rsshub://sspai/matrix",
+      "enabled": false,
+      "serves": [
+        "intel"
+      ],
+      "tier": "T3",
+      "owner_entity": null,
+      "tags": [
+        "媒体",
+        "数码"
+      ],
+      "windowed": true,
+      "stale_after_hours": 168,
+      "notes": "2026-10-24 实测可用但更新低频（单条可达 49 小时）。数码硬件画像弱，默认不启用。"
     }
   ]
 }

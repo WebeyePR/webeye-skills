@@ -24,7 +24,11 @@ import diffcore
 SOURCE_KEYS = {"id", "name", "kind", "url", "enabled", "serves", "tier", "owner_entity",
                "tags", "windowed", "stale_after_hours", "timeout_seconds", "config", "notes"}
 SETTINGS_KEYS = {"stale_after_hours", "request_timeout_seconds", "request_retries",
-                 "collect_concurrency", "host_concurrency", "collect_wall_clock_seconds"}
+                 "collect_concurrency", "host_concurrency", "collect_wall_clock_seconds",
+                 "rsshub_base"}
+
+# RSSHub 自部署服务默认地址；改部署地址只需改 sources.json settings.rsshub_base 一处
+RSSHUB_BASE_DEFAULT = "http://127.0.0.1:1200"
 
 
 def load_sources(ws):
@@ -36,11 +40,16 @@ def load_sources(ws):
     core.check_keys(rec, {"version", "settings", "sources"}, "sources.json")
     settings = rec.get("settings") or {}
     core.check_keys(settings, SETTINGS_KEYS, "sources.settings")
+    rsshub_base = (settings.get("rsshub_base") or RSSHUB_BASE_DEFAULT).rstrip("/")
     sources = []
     for s in rec.get("sources") or []:
         core.check_keys(s, SOURCE_KEYS, "source %s" % s.get("id", "?"))
         if not s.get("id") or not s.get("url"):
             raise SystemExit("[config-error] 源缺少 id 或 url: %r" % s.get("id"))
+        url = s["url"]
+        if url.startswith("rsshub://"):
+            # rsshub://<路由路径> → 自部署 RSSHub 实际地址（部署迁移时只改 settings.rsshub_base）
+            s = dict(s, url=rsshub_base + "/" + url[len("rsshub://"):])
         if s.get("enabled", True):
             sources.append(s)
     return sources, settings
