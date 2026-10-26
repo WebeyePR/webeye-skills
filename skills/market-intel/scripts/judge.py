@@ -268,6 +268,26 @@ def lead_blocks(leads, limit=5, view_url=None):
     return blocks
 
 
+def save_leads_latest(ws, new_leads, now, touched):
+    """落盘待处理线索视图（out/leads-latest.json）。
+
+    防覆盖丢失：上一轮视图里尚未入池（status=new 且无 record_id）的线索并入本轮，
+    否则连续两轮判断时前一轮待办会被静默覆盖（流水虽可查，但待办视图丢失会漏闭环）。
+    touched：本轮触及实体集合（或其数量）。
+    """
+    prev_latest = core.jload(os.path.join(ws, "out", "leads-latest.json"), None) or {}
+    fresh_keys = {l.get("dedupe_key") for l in new_leads}
+    carried = [l for l in (prev_latest.get("leads") or [])
+               if l.get("status") == "new" and not l.get("record_id")
+               and l.get("dedupe_key") not in fresh_keys]
+    n_matched = touched if isinstance(touched, int) else len(touched or [])
+    core.jdump(os.path.join(ws, "out", "leads-latest.json"),
+               {"run_at": now, "leads": list(new_leads) + carried,
+                "summary": {"new_leads": len(new_leads), "carried_unpooled": len(carried),
+                            "matched_entities": n_matched}})
+    return carried
+
+
 def write_card(ws, name, card):
     path = os.path.join(ws, "out", name)
     core.jdump(path, card)
@@ -561,9 +581,7 @@ def cmd_input(ws, input_path):
         if lead["notify"]:
             new_leads.append(lead)
 
-    core.jdump(os.path.join(ws, "out", "leads-latest.json"),
-               {"run_at": now, "leads": new_leads,
-                "summary": {"new_leads": len(new_leads), "matched_entities": len(touched)}})
+    save_leads_latest(ws, new_leads, now, touched)
 
     # 5) 产卡（脚本产卡、直接发送；群卡仅高分/高优时出现）
     view_url = (notify_cfg.get("bitable") or {}).get("view_url")
@@ -804,6 +822,8 @@ def main():
     ap.add_argument("--digest", action="store_true", help="产出每日摘要卡（delta 窗口）")
     ap.add_argument("--commit", action="store_true", help="与 --digest 连用：推进摘要锚点")
     ap.add_argument("--status-card", action="store_true", help="产出扫描状态简报卡")
+    ap.add_argument("--research-check", action="store_true",
+                    help="调研完整度审计：逐企业核对 14 必研字段，未达标退出码 2")
     ap.add_argument("--bitable", action="store_true",
                     help="把 status=new 的线索构建为猎隼线索池待写记录（预览）；加 --commit 才真正写入")
     ap.add_argument("--lead-card", action="store_true",
@@ -812,13 +832,20 @@ def main():
     ws = core.workspace(args.workspace)
     if args.lead_card:
         raise SystemExit(cmd_lead_card(ws))
+    if args.research_check:
+        import bitable
+        raise SystemExit(2 if bitable.audit_enrichments(ws) else 0)
     if args.bitable:
         import bitable
         cfg = (core.jload(os.path.join(ws, "notify.json"), {}) or {}).get("bitable") or {}
         if args.commit:
-            pushed, exists, failed = bitable.commit(ws, cfg)
-            print("猎隼线索池写入完成：新增 %d、已存在跳过 %d、失败 %d" % (pushed, exists, failed))
-            raise SystemExit(0 if failed == 0 else 3)
+            pushed, exists, failed, blocked = bitable.commit(ws, cfg)
+            print("猎隼线索池写入完成：新增 %d、已存在跳过 %d、失败 %d、调研未齐全拦截 %d"
+                  % (pushed, exists, failed, blocked))
+            if blocked:
+                sys.stderr.write("[bitable] 有线索因调研未齐全被拦截（先补调研再重跑，"
+                                 "审计命令：--research-check）\n")
+            raise SystemExit(0 if (failed == 0 and blocked == 0) else (4 if blocked else 3))
         items = bitable.build_pending(ws, cfg)
         if not items:
             print("没有待写线索（leads.jsonl 中 status=new 的已全部处理）。")

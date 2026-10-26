@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Webeye CSBU AI Skills 全局技能元数据注册表",
-  "generated_at": "2026-10-26 14:17:38",
+  "generated_at": "2026-10-26 16:12:35",
   "total_skills": 16,
   "skills": [
     {
@@ -351,7 +351,7 @@
       "has_skill_md": true,
       "title": "market-intel（市场情报雷达）",
       "description": "监控市场情报并发现潜在客户（需求源：市场情报内参闭环需求文档）。四大版块：① 潜在客户挖取—— 把融资/招聘/业务暴增/榜单新晋等事实聚合到企业档案，按\"三维域限定（八行业+中国企业+业务出海） + P0/P1 信号组\"确定性匹配，P0（近1月融资/近3月业务暴增/新品发布/榜单新晋任一）优先建联推送， P1 入池进日报；② 重点资讯情报——Gemini 竞对模型/价格、Google Cloud、八行业趋势； ③ 活动情报——B2B 出海活动白名单筛选；④ 每日内参——需求文档版式卡片（活动日历/行业重点新闻/ 榜单监控/潜在客户与业务情报，indigo 头图；榜单段有数据才出现），确认线索对接「猎隼线索池」多维表格（预设待权限校准）。适用于：\"最近八行业 有什么动态\"、\"帮我盯种子到B轮刚融资的出海公司\"、\"这类线索定时推给我\"。触发举例：\"市场情报简报\"、 \"发现了哪些潜在客户\"、\"把某公司加入监控\"。",
-      "version": "0.2.8",
+      "version": "0.3.0",
       "author": "Webeye CSBU Team",
       "license": "MIT",
       "alwaysActive": false,
@@ -390,7 +390,7 @@
       "has_requirements": false,
       "has_package_json": false,
       "total_files": 29,
-      "total_lines": 5315
+      "total_lines": 5412
     },
     {
       "name": "webeye-kb-organizer",

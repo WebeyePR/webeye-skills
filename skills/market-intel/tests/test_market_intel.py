@@ -23,6 +23,7 @@ import facts as facts_mod  # noqa: E402
 import judge  # noqa: E402
 import match as match_mod  # noqa: E402
 import pipeline  # noqa: E402
+import bitable  # noqa: E402
 
 
 class TestLoadSources(unittest.TestCase):
@@ -806,6 +807,96 @@ class TestEnrichDetail(unittest.TestCase):
         out = collect.enrich_detail({"config": {"detail_enrich": True}}, entry, {}, budget)
         self.assertEqual(budget[0], 3, "无 enricher 的域名不消耗抓取配额")
         self.assertEqual(out["summary"], "")
+
+
+class TestLeadsLatestCarryOver(unittest.TestCase):
+    """leads-latest 防覆盖：未入池线索跨轮保留，不因下一轮判断静默丢失。"""
+
+    def test_carry_over_unpooled_leads(self):
+        with tempfile.TemporaryDirectory() as ws:
+            old = {"run_at": "t0", "leads": [
+                {"entity_name": "A未入池", "status": "new", "dedupe_key": "k-a"},
+                {"entity_name": "B已入池", "status": "new", "record_id": "recX", "dedupe_key": "k-b"},
+                {"entity_name": "C本轮重现", "status": "new", "dedupe_key": "k-c"},
+            ]}
+            core.jdump(os.path.join(ws, "out", "leads-latest.json") if os.path.isdir(os.path.join(ws, "out")) else _mk_out(ws), old)
+            fresh = [{"entity_name": "C本轮重现", "status": "new", "dedupe_key": "k-c"}]
+            carried = judge.save_leads_latest(ws, fresh, "t1", 1)
+            out = core.jload(os.path.join(ws, "out", "leads-latest.json"), None)
+            names = [l["entity_name"] for l in out["leads"]]
+            self.assertEqual(names, ["C本轮重现", "A未入池"],
+                             "仅未入池且本轮未重现的线索被并入；已入池的不重复")
+            self.assertEqual(out["summary"]["carried_unpooled"], 1)
+            self.assertEqual([l["entity_name"] for l in carried], ["A未入池"])
+
+    def test_no_prev_file(self):
+        with tempfile.TemporaryDirectory() as ws:
+            _mk_out(ws)
+            judge.save_leads_latest(ws, [], "t1", 0)
+            out = core.jload(os.path.join(ws, "out", "leads-latest.json"), None)
+            self.assertEqual(out["leads"], [])
+
+
+class TestEnrichmentGate(unittest.TestCase):
+    """调研完整度门槛：14 必研字段缺一不可（兜底值算完成），入池硬前置。"""
+
+    @staticmethod
+    def _complete_fields():
+        return {k: "v-%s" % k for k in bitable.REQUIRED_ENRICH_FIELDS}
+
+    def test_gaps_complete_and_fallback_ok(self):
+        self.assertEqual(bitable.enrichment_gaps(self._complete_fields()), [])
+        # 兜底值本身就是调研结论，算完成
+        f = self._complete_fields()
+        f.update({"funding": "未公开", "contact": "未查询到有效信息", "tech_stack": "未查明"})
+        self.assertEqual(bitable.enrichment_gaps(f), [])
+        # 兼容完整调研记录形态（含 fields 键）
+        self.assertEqual(bitable.enrichment_gaps({"fields": f}), [])
+
+    def test_gaps_detect_missing_and_empty(self):
+        f = {k: v for k, v in self._complete_fields().items() if k not in ("funding", "website")}
+        gaps = bitable.enrichment_gaps(f)
+        self.assertEqual(len(gaps), 2)
+        self.assertTrue(any("融资动态" in g for g in gaps))
+        f["funding"] = ""  # 空串与缺失同级
+        self.assertEqual(len(bitable.enrichment_gaps(f)), 2)
+        # 完全没调研 = 全缺
+        self.assertEqual(len(bitable.enrichment_gaps(None)),
+                         len(bitable.REQUIRED_ENRICH_FIELDS))
+
+    def test_audit_enrichments_counts_and_pass(self):
+        with tempfile.TemporaryDirectory() as ws:
+            os.makedirs(os.path.join(ws, "log"))
+            complete = self._complete_fields()
+            partial = {k: v for k, v in complete.items() if k != "financials"}
+            leads = [
+                {"lead_id": "l1", "entity_id": "e1", "entity_name": "甲公司"},
+                {"lead_id": "l2", "entity_id": "e2", "entity_name": "乙公司"},
+                {"lead_id": "l3", "entity_id": "e3", "entity_name": "丙公司"},
+                {"lead_id": "l4", "entity_id": "e4", "entity_name": "丁公司",
+                 "bitable_status": "filtered"},  # 被规则淘汰的不参与审计
+            ]
+            enrichments = [
+                {"entity_id": "e1", "entity_name": "甲公司", "fields": complete},
+                {"entity_id": "e2", "entity_name": "乙公司", "fields": partial},
+                {"entity_id": "orphan", "entity_name": "孤儿", "fields": complete},  # 孤儿不记失败
+            ]
+            for name, rows in (("leads.jsonl", leads), ("enrichments.jsonl", enrichments)):
+                with open(os.path.join(ws, "log", name), "w", encoding="utf-8") as fh:
+                    for r in rows:
+                        fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+            # e2 缺 financials、e3 未调研 → 2 家不达标
+            self.assertEqual(bitable.audit_enrichments(ws), 2)
+            # 补齐后归零（append-only 后写覆盖先写）
+            with open(os.path.join(ws, "log", "enrichments.jsonl"), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"entity_id": "e2", "fields": complete}, ensure_ascii=False) + "\n")
+                fh.write(json.dumps({"entity_id": "e3", "fields": complete}, ensure_ascii=False) + "\n")
+            self.assertEqual(bitable.audit_enrichments(ws), 0)
+
+
+def _mk_out(ws):
+    os.makedirs(os.path.join(ws, "out"), exist_ok=True)
+    return os.path.join(ws, "out", "leads-latest.json")
 
 
 if __name__ == "__main__":

@@ -32,6 +32,41 @@ ENRICH_TEXT_FIELDS = {"tech_stack": "技术底座", "ceo": "CEO/高管姓名",
                       "opportunity": "GCP切入点", "website": "官网链接"}
 ENRICH_SELECT_FIELDS = {"size": "企业规模", "founded": "成立年限", "city": "所在城市/区域"}
 
+# 调研完整度门槛：14 个必研字段，缺一不可——每个字段要么给出调研值，
+# 要么填该字段的兜底值（查不到≠可以不写，兜底值本身就是调研结论）。
+# 这是线索入池的硬前置：调研不齐全的线索 --commit 会拒绝写入（blocked），
+# 因为残缺画像会让破冰话术失真、后续潜在线索判断失去依据。
+REQUIRED_ENRICH_FIELDS = {
+    "profile": "一句话业务描述（按证据链概括）",
+    "business": "主营业务/产品线（查不到填 未公开）",
+    "funding": "融资动态：最新轮次+金额+时间（查不到填 未公开）",
+    "investors": "背后资方/投资机构（查不到填 未公开）",
+    "financials": "经营规模：员工/营收量级（查不到填 未公开）",
+    "tech_stack": "技术底座（查不到填 未查明）",
+    "ceo": "CEO/高管姓名（查不到填 未查询到）",
+    "size": "企业规模（查不到填 未公开）",
+    "founded": "成立年限（查不到填 未公开）",
+    "city": "所在城市/区域（查不到填 未公开）",
+    "contact": "联系方式（查不到填 未查询到有效信息）",
+    "website": "官网链接（确无独立官网填 无官网）",
+    "opportunity": "GCP切入点（结合业务模式推演，必须给出）",
+    "icebreaker": "打单破冰话术 100~150 字",
+}
+
+
+def enrichment_gaps(enr):
+    """调研完整度校验：返回缺失的必研字段中文名列表。
+
+    入参兼容两种形态：完整调研记录 {"fields": {...}} 或直接传 fields dict
+    （load_enrichments 的返回值就是 fields dict）。空 dict / None 全缺。
+    """
+    if isinstance(enr, dict) and isinstance(enr.get("fields"), dict):
+        f = enr["fields"]
+    else:
+        f = enr if isinstance(enr, dict) else {}
+    return [label for key, label in REQUIRED_ENRICH_FIELDS.items()
+            if f.get(key) in (None, "", [], {})]
+
 
 def load_enrichments(ws):
     """读 AI 调研补全 log/enrichments.jsonl -> {entity_id: fields}（后写覆盖先写）。"""
@@ -231,7 +266,7 @@ def build_pending(ws, cfg):
     import match as match_mod
     rules = core.jload(os.path.join(ws, "rules.json"), None) or {}
     enrichments = load_enrichments(ws)
-    stale, items, updates = [], [], {}
+    stale, items, updates, used_eids = [], [], [], set()
     for ld in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl")):
         if ld.get("bitable_status", "pending") != "pending":
             continue
@@ -242,12 +277,36 @@ def build_pending(ws, cfg):
             updates[ld.get("lead_id")] = {"bitable_status": "filtered",
                                           "bitable_note": "当前规则不再命中"}
             continue
+        eid = ld.get("entity_id")
+        enr = enrichments.get(eid)
+        # 兜底：调研记录 entity_id 与线索不一致时按 entity_name 匹配（后写覆盖先写）
+        if enr is None:
+            name = (ld.get("entity_name") or "").split("（")[0]
+            for r in reversed(list(core.read_jsonl(os.path.join(ws, "log", "enrichments.jsonl")))):
+                if (r.get("entity_name") or "").split("（")[0] == name and isinstance(r.get("fields"), dict):
+                    enr = r["fields"]
+                    sys.stderr.write("[bitable] %s 的调研按 entity_name 兜底匹配"
+                                     "（entity_id=%s 与线索 %s 不一致，建议修正）\n"
+                                     % (name, r.get("entity_id"), eid))
+                    break
+        if enr:
+            used_eids.add(eid)
+        gaps = enrichment_gaps(enr)
+        if gaps:
+            sys.stderr.write("[bitable] %s 调研未达完整度门槛（缺 %d 项）：%s\n"
+                             % (ld.get("entity_name") or eid, len(gaps), "、".join(gaps)))
         items.append({
             "lead_id": ld.get("lead_id"),
-            "entity_id": ld.get("entity_id"),
+            "entity_id": eid,
             "company": ld.get("entity_name"),
-            "record": build_record(ld, fact, cfg, enrichment=enrichments.get(ld.get("entity_id"))),
+            "research_gaps": gaps,
+            "record": build_record(ld, fact, cfg, enrichment=enr),
         })
+    # 护栏：存在调研却没被任何待写线索消费——多半是 entity_id 写错（静默丢字段的根因）
+    orphan = [e for e in enrichments if e not in used_eids]
+    if orphan:
+        sys.stderr.write("[bitable] 警告：%d 条调研未匹配到任何待写线索（entity_id 不一致？）: %s\n"
+                         % (len(orphan), "、".join(orphan)))
     if updates:
         _update_leads(ws, updates)
     if stale:
@@ -303,14 +362,18 @@ def _update_leads(ws, updates):
 
 
 def commit(ws, cfg, yes=False):
-    """把 pending 记录取回、校验、去重后写入表格。返回 (pushed, exists, failed)。"""
+    """把 pending 记录取回、校验、去重后写入表格。返回 (pushed, exists, failed, blocked)。
+
+    调研完整度硬门槛：pending 里 research_gaps 非空的线索拒绝写入（blocked）——
+    残缺画像会污染线索池、误导后续潜在线索判断；先补调研（兜底值也算完成）再重跑。
+    """
     if not cfg.get("enabled"):
         print("bitable 未启用（notify.json bitable.enabled=false），先校准映射后启用。")
-        return 0, 0, 0
+        return 0, 0, 0, 0
     payload = core.jload(pending_path(ws), None)
     if not payload or not payload.get("records"):
         print("无可写记录（先跑 --bitable 生成预览）。")
-        return 0, 0, 0
+        return 0, 0, 0, 0
     options = _fetch_options(cfg)
     allowed = {}
     fld = cfg.get("field_map") or {}
@@ -319,6 +382,7 @@ def commit(ws, cfg, yes=False):
             allowed[fname] = options[fname]
     # 选项校验（丢弃不在选项里的值并告警）
     dropped = []
+    dropped_map = {}  # lead_id -> 丢弃明细（随写入日志留痕，便于复盘字段映射）
     for it in payload["records"]:
         rec = it["record"]
         for fname, opts in allowed.items():
@@ -327,6 +391,7 @@ def commit(ws, cfg, yes=False):
                 bad = [v for v in vals if v not in opts]
                 if bad:
                     dropped.append((it["company"], fname, bad))
+                    dropped_map.setdefault(it["lead_id"], []).append({"field": fname, "values": bad})
                     keep = [v for v in vals if v in opts]
                     rec[fname] = keep if keep else None
         for k in list(rec):
@@ -335,7 +400,7 @@ def commit(ws, cfg, yes=False):
     for company, fname, bad in dropped:
         sys.stderr.write("[bitable] %s 的 %s 含无效选项 %s，已丢弃\n" % (company, fname, ",".join(bad)))
 
-    pushed, exists, failed = 0, 0, 0
+    pushed, exists, failed, blocked = 0, 0, 0, 0
     updates, logs = {}, []
     for it in payload["records"]:
         name = it["company"] or ""
@@ -343,12 +408,23 @@ def commit(ws, cfg, yes=False):
         if not name:
             failed += 1
             continue
+        # 调研完整度硬门槛：缺必研字段（连兜底值都没填）的线索不入池
+        gaps = it.get("research_gaps") or []
+        if gaps:
+            blocked += 1
+            sys.stderr.write("[bitable] %s 调研未齐全，拒绝入池（缺 %d 项：%s）。"
+                             "先按 references/bitable-fields.md 补调研（兜底值也算完成）再重跑。\n"
+                             % (name, len(gaps), "、".join(gaps)))
+            logs.append({"lead_id": it["lead_id"], "company": name, "result": "blocked",
+                         "research_gaps": gaps, "at": core.now_iso()})
+            continue
         rid = _search_company(name, cfg)
         if rid:
             exists += 1
             updates[it["lead_id"]] = {"bitable_status": "exists", "bitable_record_id": rid}
             logs.append({"lead_id": it["lead_id"], "company": name, "result": "exists",
-                         "record_id": rid, "at": core.now_iso()})
+                         "record_id": rid, "at": core.now_iso(),
+                         **({"dropped_options": dropped_map[it["lead_id"]]} if it["lead_id"] in dropped_map else {})})
             continue
         body = json.dumps({"create_records": [rec]}, ensure_ascii=False)
         d = _cli(["+record-batch-create", "--json", body] + (["--yes"] if yes else []), cfg)
@@ -363,7 +439,8 @@ def commit(ws, cfg, yes=False):
             pushed += 1
             updates[it["lead_id"]] = {"bitable_status": "pushed", "bitable_record_id": new_rid}
             logs.append({"lead_id": it["lead_id"], "company": name, "result": "pushed",
-                         "record_id": new_rid, "at": core.now_iso()})
+                         "record_id": new_rid, "at": core.now_iso(),
+                         **({"dropped_options": dropped_map[it["lead_id"]]} if it["lead_id"] in dropped_map else {})})
         else:
             failed += 1
             err = json.dumps(d.get("error", d), ensure_ascii=False)[:200]
@@ -375,4 +452,50 @@ def commit(ws, cfg, yes=False):
         _update_leads(ws, updates)
     for lg in logs:
         core.append_jsonl(os.path.join(ws, "log", "bitable.jsonl"), lg)
-    return pushed, exists, failed
+    return pushed, exists, failed, blocked
+
+
+def audit_enrichments(ws):
+    """调研完整度审计（--research-check）：逐企业核对 14 必研字段。
+
+    检查对象 = leads.jsonl 里所有非 filtered 线索对应的企业：
+    - 无调研记录 → 未调研；
+    - 有调研但缺字段（连兜底值都没填）→ 不完整。
+    孤儿调研（没对应任何线索）只告警不计失败（多为 entity_id 笔误，另见 build_pending 提示）。
+    返回失败企业数（0 = 全部达标）。
+    """
+    leads = [l for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))
+             if (l.get("bitable_status") or "pending") != "filtered"]
+    enrichments = load_enrichments(ws)
+    lead_eids = {l.get("entity_id") for l in leads}
+    name_by_eid = {l.get("entity_id"): l.get("entity_name") or l.get("entity_id") for l in leads}
+    orphan = [e for e in enrichments if e not in lead_eids]
+    bad, table = [], []
+    for eid in sorted(lead_eids):
+        enr = enrichments.get(eid)
+        if enr is None:
+            # 与 build_pending 相同的 entity_name 兜底
+            name = (name_by_eid.get(eid) or "").split("（")[0]
+            for r in reversed(list(core.read_jsonl(os.path.join(ws, "log", "enrichments.jsonl")))):
+                if (r.get("entity_name") or "").split("（")[0] == name and isinstance(r.get("fields"), dict):
+                    enr = r["fields"]
+                    break
+        gaps = enrichment_gaps(enr)
+        if not enr:
+            gaps = ["【未调研】"] + list(REQUIRED_ENRICH_FIELDS.values())
+        label = name_by_eid.get(eid) or eid
+        if gaps:
+            bad.append(eid)
+            table.append("✗ %s：%s" % (label, "；".join(gaps[:4]) + ("等 %d 项" % len(gaps) if len(gaps) > 4 else "")))
+        else:
+            table.append("✓ %s：14/14 齐全" % label)
+    for line in table:
+        print(line)
+    if orphan:
+        sys.stderr.write("[audit] 孤儿调研（未匹配任何线索，entity_id 笔误？）：%s\n" % "、".join(orphan))
+    if bad:
+        sys.stderr.write("[audit] %d/%d 企业调研未达完整度门槛——先补调研再 --bitable --commit\n"
+                         % (len(bad), len(lead_eids)))
+    else:
+        print("调研完整度审计通过：%d/%d 企业齐全" % (len(lead_eids), len(lead_eids)))
+    return len(bad)

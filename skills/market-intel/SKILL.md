@@ -9,7 +9,7 @@ description: >-
   榜单监控/潜在客户与业务情报，indigo 头图；榜单段有数据才出现），确认线索对接「猎隼线索池」多维表格（预设待权限校准）。适用于："最近八行业
   有什么动态"、"帮我盯种子到B轮刚融资的出海公司"、"这类线索定时推给我"。触发举例："市场情报简报"、
   "发现了哪些潜在客户"、"把某公司加入监控"。
-version: 0.2.8
+version: 0.3.0
 author: Webeye CSBU Team
 license: MIT
 alwaysActive: false
@@ -226,7 +226,8 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
 5. 发送**每日内参大卡一张**：`judge.py --digest` 产 card-daily → 发群（可选同步私信）→
    发送成功后 `judge.py --digest --commit` 推进锚点。**不默认发情报卡/线索卡/群@**
    （按需点播才发，见第 4 步「发送纪律」）。
-6. 本轮有新线索 → 继续闭环：`--bitable` 预览 → AI 调研补全（references/bitable-fields.md）
+6. 本轮有新线索 → 继续闭环：`--bitable` 预览 → AI 调研补全（references/bitable-fields.md，
+   14 必研字段齐全，可用 `--research-check` 审计）
    → 确认 → `--bitable --commit` 入池 → `--lead-card` 发线索卡（私信，P0 加群@）。
 工作区默认 ~/.market-intel/。
 ```
@@ -240,10 +241,14 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
    构建时会用**当前规则重算匹配**：旧规则遗留、现已不满足"中国企业+出海"硬筛的线索
    自动标记 filtered 排除；记录只填机器可靠字段（公司名称/业务描述/赛道/标签细分/
    融资轮次/资方/曝光媒体/GCP切入点/跟进状态/抓取时间/官网兜底链接）。
-2. **AI 调研补全**（`--bitable` 预览前后皆可）：按 `references/bitable-fields.md` 字段标准，
-   用已有数据源（facts 档案/情报流水）+ 联网调研补齐 技术底座/CEO/企业规模/成立年限/
-   所在城市/联系方式/打单破冰话术，写 `log/enrichments.jsonl`（契约见该文档）；
-   查不到填规定兜底值（未查明/未公开/未查询到有效信息），**不猜**；重新跑
+2. **AI 调研补全（入池硬前置，代码强制）**：按 `references/bitable-fields.md` 字段标准，
+   用已有数据源（facts 档案/情报流水）+ 联网调研补齐 **14 个必研字段**（业务/融资/资方/
+   经营规模/技术底座/CEO/规模/年限/城市/联系方式/官网/GCP切入点/破冰话术等），
+   写 `log/enrichments.jsonl`（契约见该文档）；查不到填规定兜底值（未查明/未公开/
+   未查询到有效信息），**不猜**——查不到≠可以不写，兜底值本身就是调研结论。
+   审计：`judge.py --research-check`（未达标退出码 2，逐企业点名缺口）。
+   **调研不齐全的线索 `--commit` 会被拒绝写入（exit 4，result=blocked）**——残缺画像
+   会污染线索池、让破冰话术失真、让后续潜在线索判断失去依据。补齐后重跑
    `judge.py --bitable` 让预览带上补全字段。select 值写入前仍过选项校验。
 3. 人工确认预览后 `judge.py --bitable --commit` —— 按「公司名称」精确检索去重
    （已存在跳过），按最新 field-list 校验选项值后写入，结果回写 leads.jsonl 与
@@ -286,7 +291,12 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
    `ativityJson`（站点源码就少拼一个 c），把时间/地点/主办方/报名规模写进变更 summary；
    解析失败静默保留原条目（AI 才可写「见报名页」并注明）。单轮抓取上限
    `settings.detail_enrich_max_per_round`（默认 12）。
-11. **P0/P1 分级口径**（需求文档）：P0 = 近1月融资 / 近3月业务暴增 / 发布新产品 /
+11. **调研 entity_id 必须与线索 entity_id 完全一致**：调研补全写 `log/enrichments.jsonl` 时
+   `entity_id` 要用 facts/leads 里的原值（如 `unknown:文远知行`、`moonshot`），自造 ID 会导致
+   调研静默匹配不上、入池记录字段全空。管线已加双保险：entity_id 匹配不上时按 entity_name
+   兜底（stderr 提示修正），完全未被消费的调研会告警点名。调研前先
+   `grep entity_id log/leads.jsonl` 确认原值。
+12. **P0/P1 分级口径**（需求文档）：P0 = 近1月融资 / 近3月业务暴增 / 发布新产品 /
     榜单新晋，任一命中即 P0（市场优先建联，实时通知）；仅满足画像（半年内融资、
     出海相关招聘）为 P1（入池+日报）。`notify_p1: false` 时 P1 不实时推送。
 11. **grounding 对"B2B"类字母数字缩写会误报**：说明文字里的 B2B、T1 等缩写中的数字
@@ -298,7 +308,13 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
 13. **猎隼线索池字段要抄表内惯例**：技术底座查不到填"未查明"、联系方式填
     "未查询到有效信息"、企业规模/成立年限/城市填"未公开"——不空着、不猜、不造选项；
     各字段定义与调研渠道见 `references/bitable-fields.md`（按 100 条历史记录反推校准）。
-14. **情报卡族视觉差异纪律**：market-intel 情报卡统一**紫色系**（violet 头 +
+14. **调研完整度是入池硬门槛（2026-10-26 起）**：`fields` 必须 14 必研字段齐全
+    （缺兜底值也算缺），`--commit` 对未齐全线索拒绝写入（exit 4，bitable.jsonl
+    result=blocked）；`--research-check` 逐企业审计。存量教训：早期契约只要求 8 个
+    字段、且"可省略"，导致 11 家已入池企业缺融资动态/经营规模/官网等——残缺画像
+    让破冰话术失真、后续判断失据（Homeika GMV 还写错口径），已全部真实联网回补。
+    经营数据必须注来源口径，多口径冲突取可溯源者并在 notes 记录纠错。
+15. **情报卡族视觉差异纪律**：market-intel 情报卡统一**紫色系**（violet 头 +
     `report_outlined` 图标 + violet-50/100 描边块），与 change-watch 蓝色铃铛监控卡
     一眼区分（实测 2026-10-23 临时测试群）。语义色共用不改：红=强提醒/P0、
     绿=正常/P1、黄=异常。改样式必须先发临时测试群实测渲染，再发正式群。
