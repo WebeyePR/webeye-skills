@@ -9,7 +9,7 @@ description: >-
   榜单监控/潜在客户与业务情报，indigo 头图；榜单段有数据才出现），确认线索对接「猎隼线索池」多维表格（预设待权限校准）。适用于："最近八行业
   有什么动态"、"帮我盯种子到B轮刚融资的出海公司"、"这类线索定时推给我"。触发举例："市场情报简报"、
   "发现了哪些潜在客户"、"把某公司加入监控"。
-version: 0.2.7
+version: 0.2.8
 author: Webeye CSBU Team
 license: MIT
 alwaysActive: false
@@ -155,15 +155,28 @@ python3 <技能目录>/scripts/judge.py --input judged.json
 （web_page 招聘关键词确定性直录）→ 规则匹配出线索（scope 三维硬筛 + 组间 OR；
 任一 tier=P0 组命中 → P0 线索实时通知，仅 P1 组命中 → 入池进日报不实时打扰）→ 产出卡片：
 
-| 卡片 | 何时出现 | 发给谁 |
-|---|---|---|
-| `card-daily-<时间>.json` | 每日摘要（`--digest`），需求文档版式内参卡（含榜单监控段） | 群 |
-| `card-digest-<时间>.json` | 内参卡渲染失败时的 simple 降级版 | 群 |
-| `card-intel-<时间>.json` | 本轮有 notify 的情报 | 群（简报） |
-| `card-intel-<时间>-group.json` | 含 high 情报 | 群 @（红头，首行 @ 提醒） |
-| `card-leads-<时间>.json` | 本轮有 P0 达标新线索 | 本人私信（P0 红标优先建联） |
-| `card-leads-<时间>-group.json` | 有 P0 线索 | 群 @（首行 @ 提醒） |
-| `card-status-<时间>.json` | 无变更但需知会 / 有异常 | 本人私信 |
+| 卡片 | 内容与作用 | 何时出现 | 发给谁 |
+|---|---|---|---|
+| `card-intel-<时间>.json` | **情报卡（按需点播）**：本轮 notify 情报逐条列出——默认不发，情报随内参大卡带出；用户点名"逐条推"时用 | 用户明确要求 | 本人私信/群 |
+| `card-intel-<时间>-group.json` | 情报卡群@版（红头 + 首行 @）——同上按需 | 用户明确要求且含 high | 群 @ |
+| `card-leads-<时间>.json` | **线索卡**：本轮新产 P0/P1 线索，P0 红标「优先建联」，含画像/机会点/「查看线索」直达猎隼池记录——市场建联行动清单 | 本轮有达标新线索（`--bitable --lead-card` 入池后重产，链接可直达） | 本人私信 |
+| `card-leads-<时间>-group.json` | 线索卡群版（首行 @）——同步 P0 客户信号 | 仅当有 P0 线索 | 群 @ |
+| `card-daily-<时间>.json` | **每日内参**：需求文档版式四段卡（活动日历/行业重点新闻/榜单监控/潜在客户与业务情报），窗口内增量，全空不产空卡 | `judge.py --digest` | 群 |
+| `card-digest-<时间>.json` | 内参渲染失败时的 simple 降级版——兜底保送达 | 仅渲染失败时 | 群 |
+| `card-status-<时间>.json` | **状态卡**：源失败/异常/无变更需知会——系统健康告知 | 管线检测到异常（`--status-card`） | 本人私信 |
+
+**发送纪律（行为边界）**：
+
+- **默认通知 = 一张每日内参大卡**（「市场团队内参：近期热点与活动简报」，四段版式，
+  热点/活动/榜单/线索全部内嵌）。巡检与人工触发（"跑一下"、"看看有什么新东西"）统一
+  只发这一张，发群（可选同步私信），**不默认叠加情报卡/线索卡/群@多张刷屏**。
+- **情报卡（card-intel）与群@版是按需点播卡**：仅当用户明确要求"逐条实时推"、"单独推
+  这条到群"时才发；平时情报内容随内参大卡的「行业重点新闻」段带出。
+- **线索闭环不受本纪律约束，正常推进**：新线索 → `--bitable` 预览 → AI 调研补全 →
+  确认 → `--bitable --commit` 写入猎隼池 → `--lead-card` 发线索卡（私信，P0 加群@）。
+  该卡是闭环交付物（带「查看线索」直达按钮），不属于刷屏；P0 线索在大卡的
+  「潜在客户与业务情报」段红标带出。
+- **测试卡只发临时测试群**且头部标注「链路测试」，验证渲染后即弃，绝不进正式群。
 
 **群卡 @ 规则**：`*-group.json` 首元素自动带 @ 提醒行，由 notify.json `notify.mention`
 驱动（`"all"` = `<at id=all></at>` @所有人，需群主开"任何人可@所有人"权限；
@@ -210,8 +223,11 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
 3. 按 references/intel-criteria.md 与 lead-criteria.md 对 changes 逐条判断，写 judged.json
    （每个 change_id 必须有结论）。
 4. `python3 <技能目录>/scripts/judge.py --input judged.json`（漏判会报错点名，必须补全）。
-5. 按收方路由发送（卡片已产好，直接发）：情报简报/日报 → 群；线索卡 → 本人私信；
-   *-group.json → 群 @。发送命令见 references/notify-card.md 降级链。
+5. 发送**每日内参大卡一张**：`judge.py --digest` 产 card-daily → 发群（可选同步私信）→
+   发送成功后 `judge.py --digest --commit` 推进锚点。**不默认发情报卡/线索卡/群@**
+   （按需点播才发，见第 4 步「发送纪律」）。
+6. 本轮有新线索 → 继续闭环：`--bitable` 预览 → AI 调研补全（references/bitable-fields.md）
+   → 确认 → `--bitable --commit` 入池 → `--lead-card` 发线索卡（私信，P0 加群@）。
 工作区默认 ~/.market-intel/。
 ```
 
@@ -295,6 +311,7 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
 
 ## 资源
 
+- `README.md` —— **新环境/新会话上手入口**：现状快照、启动清单、文档地图（先读这个再读本文件）
 - `config/sources.json.example` —— 公共源登记册模板（字段说明见 `references/sources-guide.md`）
 - `references/rsshub-sources.md` —— 本地 RSSHub 部署/地址管理/已核实渠道清单与排错（动 RSSHub 相关配置前必读）
 - `config/entities.json.example` —— 企业与行业词表模板
