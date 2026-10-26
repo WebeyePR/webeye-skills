@@ -10,7 +10,7 @@
  "digest": {
   "enabled": true,
   "template": "briefing",
-  "_comment": "每日内参卡：template=briefing 为需求文档三段式版式（活动日历/行业重点新闻/潜在客户与业务情报，indigo 头图）；渲染失败自动降级 simple 版式（宁重勿漏）。delta 锚点式：每天固定时刻跑 judge.py --digest，发送成功后跑 --digest --commit 推进锚点。"
+  "_comment": "每日内参卡：template=briefing 为需求文档四段式版式（活动日历/行业重点新闻/榜单监控/潜在客户与业务情报，indigo 头图；空段不占位）；渲染失败自动降级 simple 版式（宁重勿漏）。delta 锚点式：每天固定时刻跑 judge.py --digest，发送成功后跑 --digest --commit 推进锚点。"
  },
  "bitable": {
   "enabled": false,
