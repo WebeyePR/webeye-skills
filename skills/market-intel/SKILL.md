@@ -9,7 +9,7 @@ description: >-
   榜单监控/潜在客户与业务情报，indigo 头图；榜单段有数据才出现），确认线索对接「猎隼线索池」多维表格（预设待权限校准）。适用于："最近八行业
   有什么动态"、"帮我盯种子到B轮刚融资的出海公司"、"这类线索定时推给我"。触发举例："市场情报简报"、
   "发现了哪些潜在客户"、"把某公司加入监控"。
-version: 0.3.0
+version: 0.3.8
 author: Webeye CSBU Team
 license: MIT
 alwaysActive: false
@@ -159,8 +159,8 @@ python3 <技能目录>/scripts/judge.py --input judged.json
 |---|---|---|---|
 | `card-intel-<时间>.json` | **情报卡（按需点播）**：本轮 notify 情报逐条列出——默认不发，情报随内参大卡带出；用户点名"逐条推"时用 | 用户明确要求 | 本人私信/群 |
 | `card-intel-<时间>-group.json` | 情报卡群@版（红头 + 首行 @）——同上按需 | 用户明确要求且含 high | 群 @ |
-| `card-leads-<时间>.json` | **线索卡**：本轮新产 P0/P1 线索，P0 红标「优先建联」，含画像/机会点/「查看线索」直达猎隼池记录——市场建联行动清单 | 本轮有达标新线索（`--bitable --lead-card` 入池后重产，链接可直达） | 本人私信 |
-| `card-leads-<时间>-group.json` | 线索卡群版（首行 @）——同步 P0 客户信号 | 仅当有 P0 线索 | 群 @ |
+| `card-leads-<时间>.json` | **线索卡**：本轮新产 P0/P1 线索，P0 红标「优先建联」，含画像/机会点/「查看线索」直达猎隼池记录——市场建联行动清单。**已在线索池的公司（exists）中性标注「已存在」且不用红块**——不是新线索，是重复提示 | `--bitable --lead-card` 入池后重产（此版为准，链接可直达） | 本人私信 |
+| `card-leads-<时间>-group.json` | 线索卡群版（首行 @）——同步 P0 客户信号。**只含全新 P0 线索**：exists（此前已入池）的绝不进群 @ 催建联 | 仅当有全新 P0 线索（`--lead-card` 产出，commit 后状态已知） | 群 @ |
 | `card-daily-<时间>.json` | **每日内参**：需求文档版式四段卡（活动日历/行业重点新闻/榜单监控/潜在客户与业务情报），窗口内增量，全空不产空卡 | `judge.py --digest` | 群 |
 | `card-digest-<时间>.json` | 内参渲染失败时的 simple 降级版——兜底保送达 | 仅渲染失败时 | 群 |
 | `card-status-<时间>.json` | **状态卡**：源失败/异常/无变更需知会——系统健康告知 | 管线检测到异常（`--status-card`） | 本人私信 |
@@ -172,10 +172,11 @@ python3 <技能目录>/scripts/judge.py --input judged.json
   只发这一张，发群（可选同步私信），**不默认叠加情报卡/线索卡/群@多张刷屏**。
 - **情报卡（card-intel）与群@版是按需点播卡**：仅当用户明确要求"逐条实时推"、"单独推
   这条到群"时才发；平时情报内容随内参大卡的「行业重点新闻」段带出。
-- **线索闭环不受本纪律约束，正常推进**：新线索 → `--bitable` 预览 → AI 调研补全 →
-  确认 → `--bitable --commit` 写入猎隼池 → `--lead-card` 发线索卡（私信，P0 加群@）。
-  该卡是闭环交付物（带「查看线索」直达按钮），不属于刷屏；P0 线索在大卡的
-  「潜在客户与业务情报」段红标带出。
+- **线索闭环不受本纪律约束，正常推进**：新线索 → AI 调研补全（14 必研字段硬门槛）→
+  `--bitable --commit` **自动写入猎隼池（无需人工确认）** → `--lead-card` 发线索卡
+  （私信，P0 加群@，带「查看线索」直达按钮）。该卡是闭环交付物，不属于刷屏；
+  P0 线索在大卡的「潜在客户与业务情报」段红标带出。人工改为**事后在表内核查修正**，
+  不把写入卡在确认步骤。
 - **测试卡只发临时测试群**且头部标注「链路测试」，验证渲染后即弃，绝不进正式群。
 
 **群卡 @ 规则**：`*-group.json` 首元素自动带 @ 提醒行，由 notify.json `notify.mention`
@@ -187,16 +188,24 @@ notify.json。
 **卡片直接发送脚本产出的 JSON，不要手拼**；发送降级链见 `references/notify-card.md`
 （飞书连接器 bot 身份 → 本地 lark-cli → 落盘 `notify-unsent-*.md` 并会话内明确提醒）。
 
-### 第 5 步：线索确认与入池闭环（人工）
+### 第 5 步：线索入池闭环（自动写入，人工事后核查）
 
-线索卡确认后把 `log/leads.jsonl` 里对应条目的 `status` 改为 `confirmed` / `rejected`
-（可直接编辑，或让 AI 改）。`rejected` 的记录是规则调优的依据。
+**默认自动入池（2026-10-26 起，用户拍板）**：调研命中即写，**不卡「人工确认预览」断点**——
+新线索 → AI 调研补全（14 必研字段硬门槛）→ `judge.py --bitable --commit` 一条命令
+自动写入（先重建预览吸收最新调研再写）→ `--lead-card` 发线索卡（带「查看线索」
+直达链接）。给出提示和链接即可，人工**事后**在表格里核查修正。
 
-确认要跟进的线索入池「猎隼线索池」多维表格——**已实装**，走「定时与自动化」章节的
-四步流程（`--bitable` 预览 → AI 调研补全 → `--bitable --commit` 写入 → `--lead-card`
-重发卡片）。注意 `status`（new/confirmed/rejected，人工确认用）与 `bitable_status`
-（pending/pushed/exists/filtered/failed，脚本回写写入结果用）是两个字段：
-写入由 `--bitable` 驱动、选 `bitable_status=pending` 的线索，**不要求先改 `status`**。
+安全性依据：写入链路自带五重护栏——调研 14 字段硬门槛（不齐全 blocked 拒写）、
+公司名去重（主名 + 别名候选精确检索，exists 不重写、不重复建行）、**exists 通知隔离**
+（已在线索池的线索私信卡标注「已存在」、绝不进群 @ 催建联——已存在的公司不是新潜在线索）、
+select 选项校验（无效值丢弃留痕）、幂等可重跑（写入 failed 的线索保留待写状态自动重试，
+不会一次网络抖动就静默丢单）。
+
+`status`（new/confirmed/rejected）保留为**事后核查字段**：人工在表内/leads.jsonl
+复核后改 `confirmed` / `rejected`，`rejected` 的记录是规则调优的依据。
+它与 `bitable_status`（pending/pushed/exists/filtered/failed/blocked，脚本回写
+写入结果用）是两个字段：写入由 `--bitable --commit` 驱动、选 `bitable_status=pending`
+的线索，**不要求先改 `status`**。
 
 ### 第 6 步：检索（随时）
 
@@ -226,9 +235,11 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
 5. 发送**每日内参大卡一张**：`judge.py --digest` 产 card-daily → 发群（可选同步私信）→
    发送成功后 `judge.py --digest --commit` 推进锚点。**不默认发情报卡/线索卡/群@**
    （按需点播才发，见第 4 步「发送纪律」）。
-6. 本轮有新线索 → 继续闭环：`--bitable` 预览 → AI 调研补全（references/bitable-fields.md，
+6. 本轮有新线索 → 继续闭环：AI 调研补全（references/bitable-fields.md，
    14 必研字段齐全，可用 `--research-check` 审计）
-   → 确认 → `--bitable --commit` 入池 → `--lead-card` 发线索卡（私信，P0 加群@）。
+   → `--bitable --commit` **自动入池（无需人工确认）** → `--lead-card` 发线索卡
+   （私信，仅全新 P0 加群@——已存在（exists）的只私信标注，不进群；带直达链接）。
+   人工事后在表内核查。
 工作区默认 ~/.market-intel/。
 ```
 
@@ -248,13 +259,44 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
    未查询到有效信息），**不猜**——查不到≠可以不写，兜底值本身就是调研结论。
    审计：`judge.py --research-check`（未达标退出码 2，逐企业点名缺口）。
    **调研不齐全的线索 `--commit` 会被拒绝写入（exit 4，result=blocked）**——残缺画像
-   会污染线索池、让破冰话术失真、让后续潜在线索判断失去依据。补齐后重跑
-   `judge.py --bitable` 让预览带上补全字段。select 值写入前仍过选项校验。
-3. 人工确认预览后 `judge.py --bitable --commit` —— 按「公司名称」精确检索去重
-   （已存在跳过），按最新 field-list 校验选项值后写入，结果回写 leads.jsonl 与
-   `log/bitable.jsonl`。重复执行幂等（exists 不重写）。
-4. `judge.py --lead-card` —— 写入后重产最近一轮线索卡：每条线索来源旁带
-   「查看线索」按钮，record 级直达表格对应记录（未入池回退表视图）。发送这版卡片。
+   会污染线索池、让破冰话术失真、让后续潜在线索判断失去依据。补齐后直接跑
+   `judge.py --bitable --commit`（会重建预览吸收补全字段）。select 值写入前仍过选项校验。
+3. `judge.py --bitable --commit` —— **自动入池（默认，无需人工确认预览）**：一条命令
+   先重建预览吸收最新调研、再按「公司名称 + 别名候选」精确检索去重（任一命中即
+   exists 跳过，防同公司异写重复建行），按最新 field-list 校验选项值后写入，
+   结果回写 leads.jsonl 与 `log/bitable.jsonl`。重复执行幂等（exists 不重写）。
+   输出带表格视图链接。人工**事后**在表内核查修正。
+   （`--bitable` 单独跑仍可用于只看预览不写入。）
+4. `judge.py --lead-card` —— 写入后重产最近一轮线索卡（私信 + 群卡两版，**发送这版**）：
+   每条线索带「查看线索」按钮 record 级直达表格记录；exists（此前已入池）的线索
+   标注「已存在」且**不进群卡**——群卡只催全新 P0 建联。`--input` 阶段产出的线索卡/
+   群卡是写入前快照，一律以本命令产出的最新时间戳版本为准。
+
+## 洁净验证标准 SOP（验证"新环境"效果时按此执行，勿即兴发挥）
+
+每轮洁净验证都是新场景，历史上每轮都冒新问题的根因是**步骤即兴 + 问题只在落盘时暴露**。
+标准顺序（2026-10-27 定稿，配套 `--dry-run` 预检）：
+
+1. **备份**：`cp -r ~/.market-intel ~/.market-intel.bak-clean-<日期-时刻>`；
+   删除更旧的备份（只留最新一份，它是复判源兼安全网）与工作区 `*.bak*` 残留。
+2. **清基线**：删 `state/streams/*`、`state/digest_anchor.json`、`out/*`、
+   `log/intel.jsonl`、`log/discarded.jsonl`；**保留** rules/sources/notify/entities、
+   `facts/`、`log/leads.jsonl`、`log/enrichments.jsonl`（防重复入池）。
+3. **全量首扫**：`pipeline.py --run`（14 源实测 224-244 条）。
+4. **构建判定（零幻觉复判）**：按 change_id 从备份 `log/intel.jsonl`/`log/discarded.jsonl`
+   原样复用历史判定（含 merged_change_ids 的主条记录要整个拷回——被合并条目换源
+   重现时靠它防重发），**只逐条判定真新增**；url/名称一律从 latest.json 带回。
+5. **沙箱预检（必做）**：`judge.py --input judged.json --already-sent <备份>/log/intel.jsonl
+   --dry-run` —— 临时副本上完整演练（白名单/覆盖度/grounding/sent-guard/产卡），
+   真实工作区零写入；**预检通过才进行下一步**，失败按报错修正后重跑预检。
+6. **正式落盘**：同命令去掉 `--dry-run`；核对输出与预检一致。
+7. **发通知**：有 high 情报先发情报群卡；`--digest` 产内参发群 + 私信；
+   **发送成功后** `--digest --commit` 推进锚点（失败不 commit）。
+   **重置后首跑 digest 是 anchor=None 的全量窗，发送前必须核对卡内不含
+   已通报旧闻**（应全被 suppressed_by_guard 过滤；leads 段允许带"此前已
+   登记"标注的历史线索）。
+8. **收尾**：删临时 judged.json；教训若为新坑，代码化或入陷阱清单后再结束
+   （"预检拦住的问题"也要评估是否值得代码化——复用场景的坑一律代码化）。
 
 ## 已知边界与陷阱（一期实测）
 
@@ -318,6 +360,86 @@ python3 <技能目录>/scripts/query.py --rolled-out               # 窗口滚�
     `report_outlined` 图标 + violet-50/100 描边块），与 change-watch 蓝色铃铛监控卡
     一眼区分（实测 2026-10-23 临时测试群）。语义色共用不改：红=强提醒/P0、
     绿=正常/P1、黄=异常。改样式必须先发临时测试群实测渲染，再发正式群。
+16. **lark-cli base batch 响应结构是 `data.record_id_list`**（2026-10-26 实测）：
+    `+record-batch-create/update` 成功响应不含 `records[].record_id`，直接解析会
+    永远拿不到、每次新建都白白多跑一次检索（曾误判为"响应未含 record_id"）。
+    用 `bitable._extract_new_rid()` 解析（兼容两种结构）。同理注意：`+record-delete`
+    的 --json 要 `record_id_list` 键；`+record-search` 响应数据在 `data.data` 矩阵 +
+    `record_id_list`（没有 `items` 键，人工验证时别读错）。
+17. **exists 线索的通知语义必须分层（2026-10-26）**：已在线索池的公司（写入层
+    `bitable_status=exists` 回写）不是新潜在线索——私信卡中性标注「已存在·已在线索池」
+    （violet 块），**绝不进群 @ 催建联**（群卡只收全新 P0，`lead_card_split` 分流）。
+    去重检索用主名 + 档案别名候选（`_dedupe_candidates`，上限 4 次），防同公司异写
+    （如「月之暗面」vs「月之暗面科技有限公司」）重复建行；写入 failed 的线索保留
+    待写状态下轮自动重试（终态仅 pushed/exists/filtered），一次网络抖动=静默丢单
+    是踩过的坑。线索卡/群卡一律以 `--lead-card`（commit 后）产出的最新版为准发送。
+18. **judged.json 顶层 `discarded` 键会被自动并入（2026-10-26 起，代码层兜底）**：
+    构建判断文件时把弃权条目单独放 `{"discarded": [...]}` 而忘并入 `intel` 列表，
+    会让覆盖度校验报缺失、退出码 2（实战踩坑两次）。现已由 `absorb_discards()`
+    自动吸收并在 stderr 提示——构建脚本可直接只填 `intel`，不必手工合并。
+19. **洁净重置流程（验证"新环境"效果时）**：先整目录备份（`cp -r` 工作区到
+    `*.bak-clean-<日期>`）→ 再清 `state/streams/`、`state/digest_anchor.json`、
+    `out/` 旧卡，保留 `rules/sources/notify` 配置与 `leads/enrichments/bitable`
+    业务记忆（防重复入池）。**`log/intel.jsonl` 是「已发登记」**：清空它会让全部
+    历史情报重新通知轰炸——重置后重判时用 `judge.py --input judged.json
+    --already-sent <备份>/log/intel.jsonl`，命中的已发情报由代码强制
+    `notify=false`（`demote_already_sent`，无需人工逐条标注）。差分基线清零后
+    首轮即为全量首扫（14 源实测 244 条）。**复用旧登记记录进 judged 时**（按
+    change_id 映射原样拷回历史判定，是零幻觉复判的推荐做法），记录会带落盘
+    回写字段（logged_at/grounding/grounding_notes）——`strip_writeback()` 已
+    代码层自动剥离（stderr 提示）；弃权登记是 `{change_id, reason}` 结构，与
+    judged 契约不同，`strip_writeback()` 同步归一为 `{discard, discard_reason}`；
+    其余未知字段仍被白名单点名拦截，属拼写错误防护，勿绕过。
+    **复判流程整体见「洁净验证标准 SOP」，配合 `--dry-run` 预检执行。**
+20. **调研与修正必须用表内选项精确值（2026-10-26 实测）**：写 `所在城市/区域`、
+    `成立年限`、`企业规模` 前**先拉 `+field-list` 核对选项**——「上海（徐汇区）」
+    会被正确丢弃（表内是「上海」）、「2012年」表内实无（看串行会误判为缓存偏差，
+    用同字段其他选项隔离测试可甄别）。选项被丢弃后用 `+record-batch-update` 修正：
+    `--json '{"update_records":{rid:{"字段":[选项]}}}'`（select 值要数组；
+    lark-cli 无 `+record-update`）。**多字段合并 update 可能报 record not_found
+    （平台侧问题，实测复现），拆成单字段逐个写即成功**。
+21. **情报摘要数字中性化（防 grounding 护栏误报重跑）**：summary 尽量不写精确
+    数字（原文没有的换算值、报告名年份、品牌名「36氪」都会触发告警）；精确数字、
+    换算口径、调研补充一律进 `number_notes` 申报。被护栏拦下时先定位对应条目，
+    数字属实则补 number_notes，切勿删护栏。
+22. **change_id 是内容寻址（2026-10-26 修复，`pipeline.make_cid`）**：源+种类+
+    条目键哈希，**不掺运行时刻**。此前 id 含 `now`，同一内容每轮/每次洁净重置都
+    拿新 id——已判记录无法复用、`--already-sent` 防重发失效、出窗回灌旧文被当
+    新消息重复轰炸（量子位/36氪回灌轮只能靠 AI 逐条识别防重，实战负担重）。
+    修复后同键同 kind 跨轮同 id：已判内容被 judge 幂等跳过，防重发天然成立。
+    旧工作区升级本版后首轮全量 id 全新属预期（旧 id 无法映射），判一次即稳定。
+23. **judged 里的 url/名称必须原文带回，禁止凭背景知识补全（2026-10-26 实测）**：
+    凭记忆写活动行 event id 会造出**根本不存在的链接**（4 条全部写错，靠变更集
+    `url` 字段逐条核对才发现）；activity.name 里凭知识补「CeMAT ASIA」原文没有、
+    属未证实信息。正确做法：`change_id → latest.json changes` 逐条带回 `url`，
+    名称只用原文出现过的子串。
+24. **卡片文案前缀由模板加，judged 不自带**：`activity.highlight` 写"看点：…"
+    会导致内参卡出现「看点：看点：」重复前缀（模板 `_activity_elements` 已加
+    前缀）。同理数字报名规模不要写进 summary（grounding 校验会拦），参考性
+    描述用「报名过半/规模大」等中性表述。
+25. **活动日历截断前按 significance 排序（2026-10-26 代码化）**：`_activity_elements`
+    此前按列表原序截取 limit=3，high 活动排后会漏。已修复为 high 优先再截断
+    （附回归测试）。AI 判定时仍应把最值得去的活动放 intel 列表前部。
+26. **merged_change_ids 具有已发登记语义（2026-10-27 代码化）**：合并报道只落
+    主条记录，被合并条目没有自己的登记行——主条滚出窗口后，被合并版本换源
+    首次差分入集（如 Anthropic IPO 的 36氪/钛媒体版）会被当全新内容重复通知。
+    `--already-sent` 构造已发集合时已把旧登记的 merged_change_ids 一并计入
+    （附回归测试）；复用历史判定时**主条记录必须整体拷回**，否则该防线失效。
+27. **问题要拦在落盘前（2026-10-27 引入 `--dry-run`）**：洁净验证每轮都是新
+    场景，白名单/覆盖度/grounding/复用结构等问题此前的暴露时机是正式落盘。
+    现已提供沙箱预检：临时副本上完整演练、真实工作区零写入。洁净验证一律
+    先 dry-run 通过再正式执行（见「洁净验证标准 SOP」）；给 judged 加新结构
+    或新复用来源时，先补 dry-run 用例再上线。
+28. **suppressed_by_guard 是"已通报"契约字段，digest 据此防旧闻重推
+    （2026-10-27 代码化）**：洁净重置全量窗复判后，旧登记情报会被 sent-guard
+    压实时通知，但 `--digest` 原先按窗口全量打包——旧闻重新进内参推群。
+    修复：sent-guard 命中即打标（无论 notify 当前值；上一轮已压成 false 的
+    记录同样要标），标记入 INTEL_KEYS 随落盘与复用继承，digest 过滤该标记；
+    AI 判定 notify=false 的记录不带标记，保留内参归档展示语义。
+29. **digest 全空不产空卡（2026-10-27 代码化）**：briefing 版式三段全空返回
+    None 后，simple 降级分支原先仍产出"0 条动态"占位卡。已修：records 与
+    leads 全空时直接不产卡。洁净重置后首跑 digest 属全量窗，发送前必须核对
+    窗口内容（ SOP 第 7 步），anchor=None 的全量窗尤其要防旧闻重推。
 
 ## 可移植性
 
