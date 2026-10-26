@@ -4,7 +4,8 @@
 设计纪律：
 - 断点：`--bitable` 先产出 out/bitable-pending.json 预览（不触网不写入）；
   `--bitable --commit` 才真正经 lark-cli 写入（预览 -> 确认 -> 写入）。
-- 去重：写入前按「公司名称」精确检索，已存在则跳过并记录，绝不重复建行。
+- 去重：写入前按「公司名称」精确检索（主名 + 档案别名候选），已存在则跳过并记录，
+  绝不重复建行；写入失败的线索保留待写状态，下轮自动重试。
 - 选项安全：提交前拉取最新 field-list 校验选项值，不在选项里的值丢弃并告警，
   绝不自造选项（select 写错值会静默失败或污染下拉）。
 - 分层填写：机器可靠字段直接写；技术底座/CEO/规模/破冰话术等走 AI 调研补全
@@ -52,6 +53,16 @@ REQUIRED_ENRICH_FIELDS = {
     "opportunity": "GCP切入点（结合业务模式推演，必须给出）",
     "icebreaker": "打单破冰话术 100~150 字",
 }
+
+
+# 写入终态：不再进待写队列。failed 不是终态——网络抖动/限流等瞬时故障必须可重试，
+# 此前按「!= pending」过滤会把写入失败的线索永久静默淘汰（一次失败=丢单）。
+TERMINAL_BITABLE_STATUS = ("pushed", "exists", "filtered")
+
+
+def retryable(ld):
+    """线索是否（仍）需要写入猎隼池：非终态即待写（含无状态新线索与 failed 重试）。"""
+    return (ld or {}).get("bitable_status") not in TERMINAL_BITABLE_STATUS
 
 
 def enrichment_gaps(enr):
@@ -268,7 +279,7 @@ def build_pending(ws, cfg):
     enrichments = load_enrichments(ws)
     stale, items, updates, used_eids = [], [], [], set()
     for ld in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl")):
-        if ld.get("bitable_status", "pending") != "pending":
+        if not retryable(ld):
             continue
         fact = facts_mod.load_fact(ws, ld.get("entity_id")) or {}
         result = match_mod.evaluate_entity(fact, rules) if fact else {"matched_groups": []}
@@ -299,6 +310,8 @@ def build_pending(ws, cfg):
             "lead_id": ld.get("lead_id"),
             "entity_id": eid,
             "company": ld.get("entity_name"),
+            # 别名带下去：写入前去重检索时兜底候选，防同公司异写重复建行
+            "aliases": (fact or {}).get("aliases") or [],
             "research_gaps": gaps,
             "record": build_record(ld, fact, cfg, enrichment=enr),
         })
@@ -329,8 +342,19 @@ def _fetch_options(cfg):
     return opts
 
 
+def _extract_new_rid(d):
+    """从 +record-batch-create 的响应提取新记录 id。
+
+    lark-cli 真实结构：data.record_id_list（数组）；records[].record_id 为旧格式兼容。
+    """
+    bdata = d.get("data") or {}
+    rid_list = bdata.get("record_id_list") or \
+        [r.get("record_id") for r in (bdata.get("records") or []) if r.get("record_id")]
+    return rid_list[0] if rid_list else None
+
+
 def _search_company(name, cfg):
-    """按公司名称检索是否已有记录（精确匹配校验）。返回 record_id 或 None。"""
+    """按公司名称检索是否已有记录（精确匹配校验，忽略大小写）。返回 record_id 或 None。"""
     d = _cli(["+record-search", "--keyword", name, "--search-field", "公司名称",
               "--field-id", "公司名称", "--limit", "20", "--format", "json"], cfg)
     if not d.get("ok"):
@@ -339,11 +363,25 @@ def _search_company(name, cfg):
     rows = data.get("data") or []
     rids = data.get("record_id_list") or []
     for row, rid in zip(rows, rids):
-        # 行是投影字段值数组（公司名称在首位）；精确相等才认定已存在
+        # 行是投影字段值数组（公司名称在首位）；精确相等（忽略大小写）才认定已存在
         cells = row if isinstance(row, list) else [row]
-        if cells and str(cells[0]).strip() == str(name).strip() and rid:
+        if cells and str(cells[0]).strip().lower() == str(name).strip().lower() and rid:
             return rid
     return None
+
+
+def _dedupe_candidates(item):
+    """去重检索候选名：公司名优先，档案别名兜底（同公司异写防重复建行），上限 4 次检索。
+
+    例：表里已有「月之暗面科技有限公司」，本轮申报「月之暗面」——仅检索主名会
+    误判为新公司重复建行；带别名候选逐个检索可命中既有记录。
+    """
+    names = []
+    for n in [item.get("company")] + list(item.get("aliases") or []):
+        n = str(n or "").strip()
+        if n and n not in names:
+            names.append(n)
+    return names[:4]
 
 
 def _update_leads(ws, updates):
@@ -418,18 +456,26 @@ def commit(ws, cfg, yes=False):
             logs.append({"lead_id": it["lead_id"], "company": name, "result": "blocked",
                          "research_gaps": gaps, "at": core.now_iso()})
             continue
-        rid = _search_company(name, cfg)
+        # 写入前去重：公司名 + 别名候选逐个精确检索，任一命中即已存在（不重复建行）
+        rid, hit_name = None, None
+        for cand in _dedupe_candidates(it):
+            rid = _search_company(cand, cfg)
+            if rid:
+                hit_name = cand
+                break
         if rid:
             exists += 1
             updates[it["lead_id"]] = {"bitable_status": "exists", "bitable_record_id": rid}
             logs.append({"lead_id": it["lead_id"], "company": name, "result": "exists",
-                         "record_id": rid, "at": core.now_iso(),
+                         "record_id": rid,
+                         **({"matched_name": hit_name} if hit_name != name else {}),
+                         "at": core.now_iso(),
                          **({"dropped_options": dropped_map[it["lead_id"]]} if it["lead_id"] in dropped_map else {})})
             continue
         body = json.dumps({"create_records": [rec]}, ensure_ascii=False)
         d = _cli(["+record-batch-create", "--json", body] + (["--yes"] if yes else []), cfg)
         if d.get("ok"):
-            new_rid = ((d.get("data") or {}).get("records") or [{}])[0].get("record_id")
+            new_rid = _extract_new_rid(d)
             if not new_rid:
                 # 防御：个别响应结构解析不到 record_id，用检索兜底，保证「查看线索」定位链不断
                 new_rid = _search_company(name, cfg)

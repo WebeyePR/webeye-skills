@@ -35,7 +35,8 @@ import match as match_mod
 
 INTEL_KEYS = {"change_id", "type", "significance", "object", "title", "summary", "url",
               "sources", "notify", "notify_reason", "merged_change_ids",
-              "discard", "discard_reason", "activity", "number_notes"}
+              "discard", "discard_reason", "activity", "number_notes",
+              "suppressed_by_guard"}
 NOTIFY_KEYS = {"version", "notify", "digest", "bitable"}
 NOTIFY_BLOCK_KEYS = {"user_id", "chat_id", "mention"}
 
@@ -231,6 +232,22 @@ def lead_pool_url(lead, view_url):
     return view_url
 
 
+def lead_exists(ld):
+    """该公司此前已在猎隼线索池（写入层 exists 分支回写 bitable_status=exists）。
+
+    语义纪律：已存在的记录绝不能再以「新潜在线索」的红色 P0 面孔推送——
+    私信卡标注「已存在」，且不进群 @（群卡只催全新线索建联，重复轰炸=骚扰）。
+    """
+    return (ld or {}).get("bitable_status") == "exists"
+
+
+def lead_card_split(leads):
+    """线索卡分流：(fresh, exists)。群卡 @ 只催 fresh；exists 只在私信卡中性标注带过。"""
+    leads = list(leads or [])
+    return ([l for l in leads if not lead_exists(l)],
+            [l for l in leads if lead_exists(l)])
+
+
 def _active(leads):
     """过滤掉已被当前规则淘汰（bitable_status=filtered）的线索——它们没入池，
     不该出现在卡片里，更不能声称"已登记线索池"。"""
@@ -243,9 +260,17 @@ def lead_blocks(leads, limit=5, view_url=None):
     blocks = []
     for ld in shown:
         pri_label, pri_color = PRIORITY_LABEL.get(ld.get("priority") or "P1", PRIORITY_LABEL["P1"])
-        head = "<text_tag color='%s'>%s</text_tag> <text_tag color='neutral'>%s</text_tag> **%s** · 匹配度 %d" % (
-            pri_color, pri_label, "/".join(ld.get("industries") or []) or "未分类",
-            ld.get("entity_name") or "未命名", ld.get("score", 0))
+        if lead_exists(ld):
+            # 已在线索池：中性标注置前、violet 块——不是新线索，是重复提示
+            head = ("<text_tag color='neutral'>已存在·已在线索池</text_tag> "
+                    "<text_tag color='%s'>%s</text_tag> <text_tag color='neutral'>%s</text_tag> "
+                    "**%s** · 匹配度 %d" % (
+                        pri_color, pri_label, "/".join(ld.get("industries") or []) or "未分类",
+                        ld.get("entity_name") or "未命名", ld.get("score", 0)))
+        else:
+            head = "<text_tag color='%s'>%s</text_tag> <text_tag color='neutral'>%s</text_tag> **%s** · 匹配度 %d" % (
+                pri_color, pri_label, "/".join(ld.get("industries") or []) or "未分类",
+                ld.get("entity_name") or "未命名", ld.get("score", 0))
         rules_line = "命中规则：" + "；".join(ld.get("matched_group_names") or ld.get("matched_groups") or [])
         ev_lines = [e.get("detail") for e in (ld.get("evidence") or []) if e.get("detail")][:3]
         body = rules_line + ("：" + "；".join(ev_lines) if ev_lines else "")
@@ -257,8 +282,10 @@ def lead_blocks(leads, limit=5, view_url=None):
         els.append(_sources_line(ld.get("sources") or []))
         pool_url = lead_pool_url(ld, view_url)
         if pool_url:
-            els.append(_button("🔍 查看线索", pool_url, size="small"))
-        blocks.append(_block(els, color="red" if ld.get("priority") == "P0" else "green"))
+            els.append(_button("已在线索池·查看既有记录" if lead_exists(ld) else "🔍 查看线索",
+                               pool_url, size="small"))
+        blocks.append(_block(els, color="violet" if lead_exists(ld)
+                             else ("red" if ld.get("priority") == "P0" else "green")))
     if len(leads) > limit:
         blocks.append({"tag": "markdown",
                        "content": "<font color='grey'>另有 %d 条线索</font>" % (len(leads) - limit),
@@ -273,13 +300,25 @@ def save_leads_latest(ws, new_leads, now, touched):
 
     防覆盖丢失：上一轮视图里尚未入池（status=new 且无 record_id）的线索并入本轮，
     否则连续两轮判断时前一轮待办会被静默覆盖（流水虽可查，但待办视图丢失会漏闭环）。
+    结转前必须回查 leads.jsonl 的最新写入状态：视图是落盘时刻的快照，其间的
+    --bitable --commit 可能已把线索推送入池——按快照结转会把已推送的线索再次
+    当待办展示，造成重复通知（2026-10-26 文远知行实例）。
     touched：本轮触及实体集合（或其数量）。
     """
     prev_latest = core.jload(os.path.join(ws, "out", "leads-latest.json"), None) or {}
+    cur_by_id = {l.get("lead_id"): l for l in
+                 core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))}
     fresh_keys = {l.get("dedupe_key") for l in new_leads}
-    carried = [l for l in (prev_latest.get("leads") or [])
-               if l.get("status") == "new" and not l.get("record_id")
-               and l.get("dedupe_key") not in fresh_keys]
+    carried = []
+    for l in (prev_latest.get("leads") or []):
+        if l.get("status") != "new" or l.get("record_id"):
+            continue
+        if l.get("dedupe_key") in fresh_keys:
+            continue
+        cur = cur_by_id.get(l.get("lead_id")) or {}
+        if (cur.get("bitable_status") or "pending") != "pending":
+            continue  # 期间已推送/已存在/已淘汰：不再是待办，不重复通知
+        carried.append(l)
     n_matched = touched if isinstance(touched, int) else len(touched or [])
     core.jdump(os.path.join(ws, "out", "leads-latest.json"),
                {"run_at": now, "leads": list(new_leads) + carried,
@@ -322,7 +361,11 @@ def _activity_elements(records, limit=3):
     markdown 粗体失效、星号原样显示（实测陷阱）。
     """
     els = []
-    for r in [x for x in records if (x.get("activity") and not x.get("discard"))][:limit]:
+    # significant 排序后再截断：high 活动不能被原序靠前的 normal 挤出日历
+    # （2026-10-26 实测：high 物流展排在第 2 位侥幸入选，列表顺序一变就会漏）
+    acts = [x for x in records if (x.get("activity") and not x.get("discard"))]
+    acts.sort(key=lambda x: 0 if x.get("significance") == "high" else 1)
+    for r in acts[:limit]:
         a = r["activity"]
         lines = ["**%s**" % (a.get("name") or r.get("title") or "未命名活动")]
         if a.get("time"):
@@ -391,6 +434,8 @@ def _lead_elements(leads, limit=3, view_url=None):
     for ld in ranked[:limit]:
         pri_label, _ = PRIORITY_LABEL.get(ld.get("priority") or "P1", PRIORITY_LABEL["P1"])
         lines = ["**%s ｜ %s**" % (ld.get("entity_name") or "未命名", pri_label)]
+        if lead_exists(ld):
+            lines.append("<font color='grey'>状态：此前已登记【猎隼线索池】，本次未重复写入</font>")
         lines.append("所属赛道：%s" % ("/".join(ld.get("industries") or []) or "待补充"))
         groups = ld.get("matched_group_names") or ld.get("matched_groups") or []
         if groups:
@@ -408,8 +453,9 @@ def _lead_elements(leads, limit=3, view_url=None):
         els.append({"tag": "markdown", "content": "\n\n".join(lines), "text_size": "notation"})
         pool_url = lead_pool_url(ld, view_url or LEAD_POOL_VIEW_URL)
         if ld.get("bitable_record_id"):
-            els.append(_button("该信息已登记【猎隼线索池】，点此查看完整线索", pool_url,
-                               btype="danger_filled"))
+            btn = ("已在线索池·点此查看既有记录" if lead_exists(ld)
+                   else "该信息已登记【猎隼线索池】，点此查看完整线索")
+            els.append(_button(btn, pool_url, btype="danger_filled"))
         else:
             els.append(_button("查看【猎隼线索池】", pool_url, btype="danger_filled"))
     return els
@@ -458,14 +504,132 @@ def briefing_card(records, leads, view_url=None):
 
 # ---------- 主流程：judged.json 落盘 ----------
 
-def cmd_input(ws, input_path):
+def absorb_discards(judged):
+    """把顶层 `discarded` 键自动并入 intel 列表并返回 (intel, 是否并入)。
+
+    构建脚本常把弃权条目单独放 judged["discarded"] 而忘并入 intel（实战踩坑两次），
+    在代码层兜住：有这个键就自动吸收，不再依赖构建者记得手工合并。
+    """
+    discards = judged.get("discarded")
+    if not isinstance(discards, list):
+        return judged.get("intel") or [], False
+    intel = list(judged.get("intel") or [])
+    intel.extend(r for r in discards if isinstance(r, dict))
+    return intel, True
+
+
+def strip_writeback(intel):
+    """复用登记的结构归一：剥离落盘回写字段 + 弃权记录转 judged 契约。
+
+    洁净重置复用场景（陷阱 19）：从旧 log/intel.jsonl 原样拷回的记录会带
+    落盘回写字段（logged_at/grounding/grounding_notes），会被字段白名单
+    拦截退出码 1——复用是标准流程，每次必踩。已知回写字段自动剥离并提示；
+    其余未知字段仍由 check_keys 点名拦截（防拼写错误静默失效）。
+
+    另：旧 log/discarded.jsonl 的弃权记录是 {change_id, reason, logged_at}
+    结构，与 judged 契约 {discard: true, discard_reason} 不一致——检测到
+    含 reason 且未带 discard 键的记录自动归一（dry-run 实测拦截后代码化）。
+    返回剥离到的回写字段集合。
+    """
+    writeback = {"logged_at", "grounding", "grounding_notes"}
+    # suppressed_by_guard 不剥离：它是"已通报"的正式契约字段（INTEL_KEYS 成员），
+    # 从旧登记复用时要原样继承给 digest 过滤。
+    stripped = set()
+    for r in intel:
+        extra = writeback & set(r)
+        if extra:
+            stripped |= extra
+            for k in extra:
+                del r[k]
+        if "reason" in r and not r.get("discard") and "discard_reason" not in r:
+            r["discard"] = True
+            r["discard_reason"] = r.pop("reason")
+    return stripped
+
+
+def demote_already_sent(intel, sent_ids):
+    """对已发登记中存在的情报强制 notify=False，返回 (处理后的 intel, 降级条数)。
+
+    洁净重置场景（清空 log/intel.jsonl 验证"新环境"）下，历史已发情报会被当新条目
+    重新通知轰炸（陷阱 19 靠人工标注 notify=false，实战负担重且易漏）。
+    传入旧 intel.jsonl 的 change_id 集合，代码层强制降级，杜绝重复轰炸。
+    """
+    if not sent_ids:
+        return intel, 0
+    demoted = 0
+    for r in intel:
+        if r.get("discard"):
+            continue
+        if r.get("change_id") in sent_ids:
+            # 命中即打标（无论 notify 当前值——上一轮已压成 false 的记录同样
+            # 是"已通报"，不打标会让 digest 在洁净重置全量窗旧闻重推）；
+            # notify 仍为 true 的同时压成 false，防实时通知重复。
+            r["suppressed_by_guard"] = True
+            if r.get("notify"):
+                r["notify"] = False
+                demoted += 1
+    return intel, demoted
+
+
+def _dry_run_input(ws, input_path, already_sent=None):
+    """沙箱预检：把工作区完整复制到临时目录后执行真实 --input 流程，真实工作区零写入。
+
+    洁净验证每轮都是新场景，历史上多次出现「落盘时才暴露」的问题（字段白名单、
+    覆盖度缺口、grounding 拦截）。dry-run 把这些问题提前到落盘前暴露：
+    预检通过再去掉 --dry-run 正式执行，失败则不改任何真实文件（兜底纪律）。
+    """
+    import shutil
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="market-intel-dryrun-")
+    try:
+        for name in os.listdir(ws):
+            if name.startswith("."):
+                continue
+            src = os.path.join(ws, name)
+            dst = os.path.join(tmp, name)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+        rc = cmd_input(tmp, input_path, already_sent=already_sent)
+        sys.stderr.write("[dry-run] 沙箱预检通过（真实工作区零写入）——去掉 --dry-run 正式执行\n")
+        return rc
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def cmd_input(ws, input_path, already_sent=None, dry_run=False):
+    if dry_run:
+        return _dry_run_input(ws, input_path, already_sent=already_sent)
     now = core.now_iso()
     latest = core.jload(os.path.join(ws, "out", "latest.json"), None)
     judged = core.jload(input_path, None)
     if not judged:
         raise SystemExit("[error] 读不到判断文件: %s" % input_path)
-    intel = judged.get("intel") or []
+    intel, absorbed = absorb_discards(judged)
+    if absorbed:
+        sys.stderr.write("[absorb] 检测到顶层 discarded 键（%d 条弃权），已自动并入 intel——"
+                         "下次构建可直接只填 intel 列表\n" % len(judged.get("discarded") or []))
+    if already_sent:
+        sent_path = os.path.expanduser(already_sent)
+        sent_ids = set()
+        for r in core.read_jsonl(sent_path) if os.path.exists(sent_path) else []:
+            if r.get("discard"):
+                continue
+            sent_ids.add(r.get("change_id"))
+            # 被合并条目也属已发：合并报道换源重现时（如 Anthropic IPO 的 36氪/
+            # 钛媒体版本在主条滚窗后首次差分入集），不加进来会重复通知轰炸
+            for mid in r.get("merged_change_ids") or []:
+                sent_ids.add(mid)
+        intel, demoted = demote_already_sent(intel, sent_ids)
+        if demoted:
+            sys.stderr.write("[sent-guard] %d 条情报已在旧登记中（洁净重置防重发），"
+                             "强制 notify=false\n" % demoted)
     fact_records = judged.get("facts") or []
+    stripped = strip_writeback(intel)
+    if stripped:
+        sys.stderr.write("[reuse] 已从 intel 记录剥离落盘回写字段: %s（复用旧登记时属预期）\n"
+                         % ", ".join(sorted(stripped)))
     for r in intel:
         core.check_keys(r, INTEL_KEYS, "intel record")
 
@@ -607,7 +771,9 @@ def cmd_input(ws, input_path):
         blocks = lead_blocks(new_leads, view_url=view_url)
         card = build_card("潜在客户线索", core.now_iso().replace("T", " ")[:16] + " · 规则匹配命中",
                           blocks + [{"tag": "markdown",
-                                     "content": "<font color='grey'>P0=优先建联；P1=储备线索。确认后登记猎隼线索池。</font>",
+                                     "content": "<font color='grey'>P0=优先建联；P1=储备线索。"
+                                                "命中线索将自动登记猎隼线索池（人工事后核查）；"
+                                                "发送以 --lead-card 重产版为准。</font>",
                                      "text_size": "notation"}],
                           template="red" if p0_leads else "green",
                           tags=[("P0×%d" % len(p0_leads), "red")] if p0_leads else [("%d 条线索" % len(new_leads), "green")])
@@ -697,9 +863,12 @@ def stamp():
 
 
 def cmd_lead_card(ws):
-    """猎隼池写入后重产最近一轮线索卡：此时 record_id 已回写，「查看线索」可直达那条记录。
+    """猎隼池写入后重产最近一轮线索卡（私信卡 + 群卡）。
 
-    运行序：judge.py --input → --bitable --commit → --lead-card（发送这版，带跳转按钮）。
+    运行序：judge.py --input → --bitable --commit → --lead-card（发送这版）。
+    必须在 commit 之后跑：此时 bitable_status 已回写，exists（此前已入池）的线索
+    在卡上中性标注「已存在」、绝不进群 @——群卡只催全新 P0 建联，重复轰炸=骚扰。
+    群卡也由本命令产出（--input 阶段的群卡是写入前快照，以本命令的最新版为准）。
     """
     latest = core.jload(os.path.join(ws, "out", "leads-latest.json"), None)
     run_ids = [l.get("lead_id") for l in (latest or {}).get("leads") or []]
@@ -728,18 +897,34 @@ def cmd_lead_card(ws):
                 ld[k] = enr[k]
     notify_cfg = load_notify(ws)
     view_url = (notify_cfg.get("bitable") or {}).get("view_url")
-    p0_leads = [l for l in leads if l.get("priority") == "P0"]
+    fresh, exists_leads = lead_card_split(leads)
+    p0_leads = [l for l in fresh if l.get("priority") == "P0"]
     blocks = lead_blocks(leads, view_url=view_url)
+    note = "已登记猎隼线索池，点「查看线索」直达对应记录。"
+    if exists_leads:
+        note += ("标注「已存在」的 %d 条为此前已登记（本次未重复写入），"
+                 "不再群@建联。" % len(exists_leads))
     blocks.append({"tag": "markdown",
-                   "content": "<font color='grey'>已登记猎隼线索池，点「查看线索」直达对应记录。</font>",
+                   "content": "<font color='grey'>%s</font>" % note,
                    "text_size": "notation"})
     card = build_card("潜在客户线索", core.now_iso().replace("T", " ")[:16] + " · 已入池",
                       blocks, template="red" if p0_leads else "green",
                       tags=[("P0×%d" % len(p0_leads), "red")] if p0_leads
                       else [("%d 条线索" % len(leads), "green")])
     path = write_card(ws, "card-leads-%s.json" % stamp(), card)
+    gpath = None
+    if p0_leads:
+        # 群卡：仅全新 P0（exists 是重复提示，绝不 @所有人 催建联）
+        gblocks = lead_blocks(p0_leads, view_url=view_url)
+        gels = ([e] if (e := _mention_lead("⚠️ P0 线索请尽快建联", notify_cfg.get("notify"))) else []) + gblocks
+        gcard = build_card("潜在客户线索 · P0 优先建联", core.now_iso().replace("T", " ")[:16],
+                           gels, template="red",
+                           tags=[("%d 条 P0 线索，请尽快跟进" % len(p0_leads), "red")])
+        gpath = write_card(ws, "card-leads-%s-group.json" % stamp(), gcard)
     located = sum(1 for l in leads if l.get("bitable_record_id"))
-    print("线索卡已重产: %s（%d 条中 %d 条带记录级定位，未入池的回退表视图）" % (path, len(leads), located))
+    print("线索卡已重产: %s（%d 条中 %d 条带记录级定位；全新 %d 条、已存在标注 %d 条%s）"
+          % (path, len(leads), located, len(fresh), len(exists_leads),
+             ("；群卡: %s" % gpath) if gpath else "；无全新 P0，本轮不产群卡"))
     return 0
 
 
@@ -751,6 +936,10 @@ def cmd_digest(ws, commit=False):
     anchor = anchor_rec.get("anchor")
     records = [r for r in core.read_jsonl(os.path.join(ws, "log", "intel.jsonl"))
                if not anchor or (core.parse_iso(r.get("logged_at")) or 0) > (core.parse_iso(anchor) or 0)]
+    # 已通报压制（sent-guard 标记）的内容不进内参：洁净重置全量窗复判时，
+    # 旧闻会被重新打包重复推送（2026-10-27 实测拦截后代码化）；AI 判定
+    # notify=false 的记录不在此列——内参保留其归档展示语义。
+    records = [r for r in records if not r.get("suppressed_by_guard")]
     leads = [l for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))
              if not anchor or (core.parse_iso(l.get("logged_at")) or 0) > (core.parse_iso(anchor) or 0)]
     if commit:
@@ -775,6 +964,11 @@ def cmd_digest(ws, commit=False):
     except Exception as exc:  # noqa: BLE001
         sys.stderr.write("[fallback] 内参卡渲染失败，降级 simple 版式: %s\n" % exc)
     if path is None:
+        if not records and not leads:
+            # 全空不产空卡（与 SKILL.md 纪律一致）：briefing 版式三段全空返回
+            # None 后，simple 降级分支也不得产出"0 条动态"占位卡
+            print("窗口内无增量（情报 0、线索 0），不产空卡；如需推进锚点加 --commit")
+            return 0
         blocks = [_block(["**本时段市场情报 %d 条**，新线索 %d 条" % (len(records), len(leads)),
                           "、".join("%s %d" % (k, v) for k, v in sorted(by_type.items(), key=lambda x: -x[1])) or "无"],
                          color="violet")]
@@ -819,6 +1013,10 @@ def main():
     ap = argparse.ArgumentParser(description="market-intel 判断落盘与线索产出")
     ap.add_argument("--workspace")
     ap.add_argument("--input", help="judged.json 路径")
+    ap.add_argument("--already-sent",
+                    help="旧 intel.jsonl 路径（洁净重置防重发）：命中的已发情报强制 notify=false")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="沙箱预检：临时副本上完整演练 --input 流程并报告问题，真实工作区零写入")
     ap.add_argument("--digest", action="store_true", help="产出每日摘要卡（delta 窗口）")
     ap.add_argument("--commit", action="store_true", help="与 --digest 连用：推进摘要锚点")
     ap.add_argument("--status-card", action="store_true", help="产出扫描状态简报卡")
@@ -839,11 +1037,19 @@ def main():
         import bitable
         cfg = (core.jload(os.path.join(ws, "notify.json"), {}) or {}).get("bitable") or {}
         if args.commit:
+            # 自动入池模式：先重建预览吸收最新调研（离线），再直接写入。
+            # 不再要求「人工确认预览」断点——调研 14 必研字段硬门槛 + 去重 +
+            # 选项校验 + blocked 留痕就是安全边界，人工事后在表内核查修正。
+            items = bitable.build_pending(ws, cfg)
+            if not items:
+                print("没有待写线索（leads.jsonl 中 status=new 的已全部处理）。")
+                raise SystemExit(0)
             pushed, exists, failed, blocked = bitable.commit(ws, cfg)
             print("猎隼线索池写入完成：新增 %d、已存在跳过 %d、失败 %d、调研未齐全拦截 %d"
                   % (pushed, exists, failed, blocked))
+            print("表格视图: %s" % (cfg.get("view_url") or "(notify.json bitable.view_url 未配置)"))
             if blocked:
-                sys.stderr.write("[bitable] 有线索因调研未齐全被拦截（先补调研再重跑，"
+                sys.stderr.write("[bitable] 有线索因调研未齐全被拦截（先补调研再重跑本命令，"
                                  "审计命令：--research-check）\n")
             raise SystemExit(0 if (failed == 0 and blocked == 0) else (4 if blocked else 3))
         items = bitable.build_pending(ws, cfg)
@@ -859,7 +1065,8 @@ def main():
     if args.status_card:
         raise SystemExit(cmd_status(ws))
     if args.input:
-        raise SystemExit(cmd_input(ws, args.input))
+        raise SystemExit(cmd_input(ws, args.input, already_sent=args.already_sent,
+                                   dry_run=args.dry_run))
     ap.print_help()
 
 

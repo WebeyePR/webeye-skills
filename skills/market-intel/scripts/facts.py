@@ -88,15 +88,19 @@ def apply_fact(ws, fact, entities, now):
     # 词表里的官方信息优先；unknown 档案允许被事实补充
     if not entity_id.startswith("unknown:"):
         rec["name"] = erec.get("name") or rec.get("name")
-    # origin / going_global：词表标注 > 判断申报 > 保留既有值（只升不降，避免覆盖）
+    # origin / going_global：词表标注 > 判断申报 > 保留既有值（只升不降，避免覆盖）。
+    # 「只升不降」必须是代码语义：档案已有非空 origin 时，申报值只在升为 CN 时才覆盖
+    # （否则 AI 修正档案后重跑同一 judged.json，旧申报值会静默回灌——2026-10-26 实测缺陷）。
     if erec.get("origin"):
         rec["origin"] = erec["origin"]
     elif fact.get("origin"):
-        rec["origin"] = fact["origin"]
+        if rec.get("origin") in (None, "") or (
+                fact["origin"] == "CN" and rec.get("origin") != "CN"):
+            rec["origin"] = fact["origin"]
     if erec.get("going_global") is not None:
         rec["going_global"] = bool(erec["going_global"])
     elif fact.get("going_global"):
-        rec["going_global"] = True
+        rec["going_global"] = True  # 一旦标注出海为真，不被后续缺申报的重跑抹掉
     # 词表实体的官方行业同样优先并入（判断给出的行业增量保留）
     for ind in (erec.get("industries") or []) + (fact.get("industries") or []):
         if ind and ind not in rec["industries"]:
@@ -113,9 +117,22 @@ def apply_fact(ws, fact, entities, now):
     event = fact.get("event") or {}
     etype = fact.get("event_type", "other")
     if etype == "funding":
-        dedupe = core.sha1(core.norm_url(event.get("source_url") or "") + "|" +
-                           (event.get("date") or "") + "|" + (event.get("round") or ""))
-        if not any(fe.get("_dedupe") == dedupe for fe in rec["funding_events"]):
+        # 幂等 + 升级合并：同一 URL 视为同一融资事件——已有记录只补空字段，
+        # 不新增（否则 AI 补全 date/round 后重跑会产生双份事件，2026-10-26 实测）。
+        url = core.norm_url(event.get("source_url") or "")
+        hit = next((fe for fe in rec["funding_events"]
+                    if core.norm_url(fe.get("source_url") or "") == url and url), None)
+        if hit:
+            changed = False
+            for k in ("date", "round", "amount_text", "investors"):
+                if event.get(k) and not hit.get(k):
+                    hit[k] = event[k]
+                    changed = True
+            if changed:
+                hit["amount_cny"] = core.parse_amount_cny(hit.get("amount_text"))
+                hit["extracted_at"] = now
+        else:
+            dedupe = core.sha1(url + "|" + (event.get("date") or "") + "|" + (event.get("round") or ""))
             rec["funding_events"].append({
                 "_dedupe": dedupe,
                 "date": event.get("date"),
@@ -142,13 +159,24 @@ def apply_fact(ws, fact, entities, now):
             rec["hiring_signals"].append({"keywords": kws, "page_url": page_url or event.get("page_url"),
                                           "first_seen": now, "last_seen": now})
     else:
-        rec["other_events"].append({
-            "kind": event.get("kind", "other"),
-            "detail": event.get("detail", ""),
-            "source_url": event.get("source_url"),
-            "confidence": fact.get("confidence", "low"),
-            "extracted_at": now,
-        })
+        # 幂等：同 URL+kind+detail 视为同一事件，重跑不重复落盘（兼容存量无 _dedupe 记录）。
+        dedupe = core.sha1(core.norm_url(event.get("source_url") or "") + "|" +
+                           (event.get("kind") or "") + "|" + (event.get("detail") or "")[:120])
+        hit = next((e for e in rec["other_events"]
+                    if e.get("_dedupe") == dedupe
+                    or core.sha1(core.norm_url(e.get("source_url") or "") + "|" +
+                                 (e.get("kind") or "") + "|" + (e.get("detail") or "")[:120]) == dedupe), None)
+        if hit:
+            hit.setdefault("_dedupe", dedupe)
+        else:
+            rec["other_events"].append({
+                "_dedupe": dedupe,
+                "kind": event.get("kind", "other"),
+                "detail": event.get("detail", ""),
+                "source_url": event.get("source_url"),
+                "confidence": fact.get("confidence", "low"),
+                "extracted_at": now,
+            })
 
     rec["updated_at"] = now
     core.jdump(path, rec)

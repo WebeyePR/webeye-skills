@@ -630,6 +630,27 @@ class TestLeadCardJump(unittest.TestCase):
         self.assertIn("**地点：** ", content)
         self.assertIn("**看点：** ", content)
 
+    def test_activity_elements_high_first(self):
+        """活动日历截断前按 significance 排序：high 不能被原序靠前的 normal 挤出。"""
+        recs = [
+            {"type": "活动情报", "significance": "normal",
+             "activity": {"name": "普通活动A", "time": "t1"}},
+            {"type": "活动情报", "significance": "normal",
+             "activity": {"name": "普通活动B", "time": "t2"}},
+            {"type": "活动情报", "significance": "high",
+             "activity": {"name": "重点物流展", "time": "t3"}},
+        ]
+        els = judge._activity_elements(recs, limit=2)
+        md = " ".join(e.get("content", "") for e in els)
+        self.assertIn("重点物流展", md, "high 活动必须入选，即使原序靠后")
+        self.assertNotIn("普通活动B", md)
+
+    def test_activity_no_highlight_prefix_dup(self):
+        """highlight 不自带"看点："前缀（模板已加），修正后落盘记录也不应再带。"""
+        recs = [{"type": "活动情报", "activity": {"name": "X", "highlight": "看点：重复前缀"}}]
+        els = judge._activity_elements(recs)
+        self.assertNotIn("看点：看点：", els[0]["content"])
+
     def test_lead_sources_includes_other_events(self):
         """other_event 命中的线索（业务暴增等）也要有来源行，不能只剩融资+招聘。"""
         fact = {"funding_events": [],
@@ -892,6 +913,404 @@ class TestEnrichmentGate(unittest.TestCase):
                 fh.write(json.dumps({"entity_id": "e2", "fields": complete}, ensure_ascii=False) + "\n")
                 fh.write(json.dumps({"entity_id": "e3", "fields": complete}, ensure_ascii=False) + "\n")
             self.assertEqual(bitable.audit_enrichments(ws), 0)
+
+    def test_apply_fact_origin_never_downgrades(self):
+        """origin 只升不降：档案已有 CN 时，重跑同一 judged.json 的旧申报值不得回灌。"""
+        with tempfile.TemporaryDirectory() as ws:
+            entities = {"industries": [], "entities": {}}
+            fact = {"entity_name": "某出海公司", "industries": ["应用"], "origin": "domestic",
+                    "event_type": "other", "event": {"kind": "product_launch", "detail": "发布新品",
+                                                     "source_url": "https://x.com/a"},
+                    "change_ids": ["c1"], "confidence": "high"}
+            facts_mod.apply_fact(ws, fact, entities, "2026-10-26T18:00:00+08:00")
+            # 人工/AI 修正为 CN（升格）
+            path = os.path.join(ws, "facts", "unknown__某出海公司.json")
+            rec = core.jload(path, None)
+            rec["origin"] = "CN"
+            core.jdump(path, rec)
+            # 重跑同一申报（origin 仍为 domestic）→ 不得回灌
+            facts_mod.apply_fact(ws, fact, entities, "2026-10-26T18:05:00+08:00")
+            self.assertEqual(core.jload(path, None)["origin"], "CN")
+            # going_global 一旦为真也不被抹掉
+            rec = core.jload(path, None)
+            rec["going_global"] = True
+            core.jdump(path, rec)
+            facts_mod.apply_fact(ws, fact, entities, "2026-10-26T18:06:00+08:00")
+            self.assertTrue(core.jload(path, None)["going_global"])
+            # 空位仍允许申报写入
+            fact2 = {"entity_name": "另一公司", "industries": ["应用"], "origin": "CN",
+                     "event_type": "other", "event": {"kind": "milestone", "detail": "d",
+                                                      "source_url": "https://x.com/b"},
+                     "change_ids": ["c2"], "confidence": "high"}
+            facts_mod.apply_fact(ws, fact2, entities, "2026-10-26T18:07:00+08:00")
+            self.assertEqual(core.jload(os.path.join(ws, "facts", "unknown__另一公司.json"), None)["origin"], "CN")
+
+    def test_apply_fact_events_idempotent_and_upgrade(self):
+        """事件幂等：重跑同 judged 不重复落盘；funding 同 URL 只补空字段不新增。"""
+        with tempfile.TemporaryDirectory() as ws:
+            entities = {"industries": [], "entities": {}}
+            oe = {"entity_name": "甲公司", "industries": ["应用"],
+                  "event_type": "other",
+                  "event": {"kind": "product_launch", "detail": "发布新品 X",
+                            "source_url": "https://x.com/news/1"},
+                  "change_ids": ["c1"], "confidence": "high"}
+            fe = {"entity_name": "乙公司", "industries": ["AI硬件"],
+                  "event_type": "funding",
+                  "event": {"kind": "funding", "source_url": "https://x.com/news/2"},
+                  "change_ids": ["c2"], "confidence": "high"}
+            for _ in range(5):
+                facts_mod.apply_fact(ws, oe, entities, "2026-10-26T18:00:00+08:00")
+                facts_mod.apply_fact(ws, fe, entities, "2026-10-26T18:00:00+08:00")
+            pa = os.path.join(ws, "facts", "unknown__甲公司.json")
+            pb = os.path.join(ws, "facts", "unknown__乙公司.json")
+            self.assertEqual(len(core.jload(pa, None)["other_events"]), 1)
+            fe_list = core.jload(pb, None)["funding_events"]
+            self.assertEqual(len(fe_list), 1)
+            self.assertIsNone(fe_list[0]["date"])  # 首次无 date
+            # 申报补充 date/amount → 升级合并同一条，不新增
+            fe["event"].update({"date": "2026-10-26", "amount_text": "2亿元"})
+            facts_mod.apply_fact(ws, fe, entities, "2026-10-26T18:10:00+08:00")
+            fe_list = core.jload(pb, None)["funding_events"]
+            self.assertEqual(len(fe_list), 1)
+            self.assertEqual(fe_list[0]["date"], "2026-10-26")
+            self.assertEqual(fe_list[0]["amount_cny"], 2e8)
+            # 存量无 _dedupe 的 other_events 也能被现算键匹配（兼容旧数据）
+            core.jdump(pa, {**core.jload(pa, None),
+                            "other_events": [{k: v for k, v in e.items() if k != "_dedupe"}
+                                             for e in core.jload(pa, None)["other_events"]]})
+            facts_mod.apply_fact(ws, oe, entities, "2026-10-26T18:11:00+08:00")
+            self.assertEqual(len(core.jload(pa, None)["other_events"]), 1)
+
+
+class TestBatchCreateResponse(unittest.TestCase):
+    """+record-batch-create 响应解析：真实结构 data.record_id_list，兼容旧 records[].record_id。"""
+
+    def test_record_id_list_structure(self):
+        self.assertEqual(bitable._extract_new_rid(
+            {"ok": True, "data": {"record_id_list": ["recA"], "rev": 1}}), "recA")
+
+    def test_legacy_records_structure(self):
+        self.assertEqual(bitable._extract_new_rid(
+            {"ok": True, "data": {"records": [{"record_id": "recB"}]}}), "recB")
+
+    def test_missing_returns_none(self):
+        self.assertIsNone(bitable._extract_new_rid({"ok": True, "data": {}}))
+        self.assertIsNone(bitable._extract_new_rid({"ok": False}))
+
+
+class TestExistsLeadSemantics(unittest.TestCase):
+    """exists 线索语义：已在线索池的公司不得再以「新潜在线索」面孔推送或群@轰炸。"""
+
+    @staticmethod
+    def _lead(**kw):
+        base = {"entity_name": "月之暗面", "industries": ["应用"], "priority": "P0",
+                "score": 90, "matched_group_names": ["p0-funding-recent"], "evidence": [],
+                "sources": [{"name": "36氪", "url": "https://36kr/1"}],
+                "bitable_status": "exists", "bitable_record_id": "rec1",
+                "logged_at": "2026-10-26T20:00:00+08:00"}
+        base.update(kw)
+        return base
+
+    def test_exists_labeled_and_not_red(self):
+        """exists 线索在卡片上必须标注「已存在」，且不用 P0 红块。"""
+        blocks = judge.lead_blocks([self._lead()], view_url="https://x/base?table=t&view=v")
+        text = json.dumps(blocks, ensure_ascii=False)
+        self.assertIn("已存在·已在线索池", text, "exists 线索必须显式标注")
+        self.assertIn("已在线索池·查看既有记录", text, "按钮文案必须点明是既有记录")
+        for b in blocks:
+            if isinstance(b, dict):
+                self.assertNotEqual(b.get("background_style"), "red-50",
+                                    "exists 线索不得用 P0 红块渲染")
+        # 内参卡潜在客户段同样标注
+        els = judge._lead_elements([self._lead()], view_url=None)
+        md = json.dumps(els, ensure_ascii=False)
+        self.assertIn("此前已登记【猎隼线索池】，本次未重复写入", md)
+        self.assertIn("已在线索池·点此查看既有记录", md)
+
+    def test_card_split_fresh_vs_exists(self):
+        """群卡素材必须剔除 exists：lead_card_split 分流正确。"""
+        fresh_lead = self._lead(entity_name="新公司", bitable_status=None,
+                                bitable_record_id=None)
+        fresh, exists = judge.lead_card_split([self._lead(), fresh_lead])
+        self.assertEqual([l["entity_name"] for l in fresh], ["新公司"])
+        self.assertEqual([l["entity_name"] for l in exists], ["月之暗面"])
+        # 全 exists 时 fresh 为空 → 群卡应不产（cmd_lead_card 以 p0_leads 空判定）
+        only_exists = judge.lead_card_split([self._lead()])
+        self.assertEqual(only_exists[0], [])
+
+
+class TestCarryOverHydration(unittest.TestCase):
+    """结转必须回查 leads.jsonl 最新状态：期间已推送的线索不得再当待办重复通知。"""
+
+    def test_pushed_between_rounds_not_carried(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as ws:
+            os.makedirs(os.path.join(ws, "log"))
+            os.makedirs(os.path.join(ws, "out"))
+            # 上一轮视图：两条待办（无 record_id）
+            old_a = {"lead_id": "a1", "entity_name": "甲", "status": "new",
+                     "dedupe_key": "k1", "logged_at": "2026-10-26T10:00:00+08:00"}
+            old_b = {"lead_id": "b2", "entity_name": "乙", "status": "new",
+                     "dedupe_key": "k2", "logged_at": "2026-10-26T10:01:00+08:00"}
+            core.jdump(os.path.join(ws, "out", "leads-latest.json"),
+                       {"run_at": "2026-10-26T10:05:00+08:00", "leads": [old_a, old_b],
+                        "summary": {}})
+            # 其间 a1 已推送入池（leads.jsonl 状态已更新），b2 仍待写
+            with open(os.path.join(ws, "log", "leads.jsonl"), "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({**old_a, "bitable_status": "pushed",
+                                     "bitable_record_id": "recX"}, ensure_ascii=False) + "\n")
+                fh.write(json.dumps(old_b, ensure_ascii=False) + "\n")
+            new_lead = {"lead_id": "c3", "entity_name": "丙", "status": "new",
+                        "dedupe_key": "k3"}
+            carried = judge.save_leads_latest(ws, [new_lead],
+                                              "2026-10-26T22:00:00+08:00", 1)
+            self.assertEqual([l["lead_id"] for l in carried], ["b2"],
+                             "已推送的 a1 不得结转（会重复通知），待写的 b2 保留")
+            view = core.jload(os.path.join(ws, "out", "leads-latest.json"), None)
+            self.assertEqual(view["summary"]["carried_unpooled"], 1)
+
+
+class TestDedupeAndRetry(unittest.TestCase):
+    """写入层去重与重试：别名候选防异写重复建行；failed 线索必须可重试。"""
+
+    def test_dedupe_candidates_aliases(self):
+        self.assertEqual(
+            bitable._dedupe_candidates({"company": "月之暗面",
+                                        "aliases": ["Kimi", "月之暗面", ""]}),
+            ["月之暗面", "Kimi"], "主名优先、去重、剔除空串")
+        self.assertEqual(bitable._dedupe_candidates({"company": "X"}), ["X"])
+        self.assertLessEqual(
+            len(bitable._dedupe_candidates({"company": "A", "aliases": list("BCDEF")})), 4,
+            "候选上限 4，控制检索次数")
+
+    def test_retryable_statuses(self):
+        """终态（pushed/exists/filtered）不重写；failed/无状态/pending 都可重试。"""
+        self.assertFalse(bitable.retryable({"bitable_status": "pushed"}))
+        self.assertFalse(bitable.retryable({"bitable_status": "exists"}))
+        self.assertFalse(bitable.retryable({"bitable_status": "filtered"}))
+        self.assertTrue(bitable.retryable({"bitable_status": "failed"}),
+                        "写入失败必须可重试，不得静默淘汰")
+        self.assertTrue(bitable.retryable({}))
+        self.assertTrue(bitable.retryable({"bitable_status": "pending"}))
+
+
+class TestAbsorbDiscards(unittest.TestCase):
+    """judged.json 顶层 discarded 键自动并入 intel（构建脚本忘合并的实战坑，代码层兜底）。"""
+
+    def test_absorbs_top_level_discarded(self):
+        judged = {"intel": [{"change_id": "a", "title": "x"}],
+                  "discarded": [{"change_id": "b", "discard": True, "discard_reason": "r"}]}
+        intel, absorbed = judge.absorb_discards(judged)
+        self.assertTrue(absorbed)
+        self.assertEqual([r["change_id"] for r in intel], ["a", "b"])
+
+    def test_no_discarded_key_passthrough(self):
+        judged = {"intel": [{"change_id": "a"}]}
+        intel, absorbed = judge.absorb_discards(judged)
+        self.assertFalse(absorbed)
+        self.assertEqual(len(intel), 1)
+        # 顶层无 intel 且无 discarded → 空列表，不炸
+        intel2, absorbed2 = judge.absorb_discards({})
+        self.assertFalse(absorbed2)
+        self.assertEqual(intel2, [])
+
+    def test_ignores_non_list_discarded(self):
+        intel, absorbed = judge.absorb_discards({"discarded": "oops", "intel": []})
+        self.assertFalse(absorbed)
+        self.assertEqual(intel, [])
+
+
+class TestMakeCid(unittest.TestCase):
+    """内容寻址 change_id：跨轮/跨洁净重置稳定（防重发幂等的根基）。"""
+
+    def test_stable_across_runs(self):
+        # 同一内容两次生成（模拟不同轮次/洁净重置后重扫）必须同 id
+        self.assertEqual(pipeline.make_cid("qbitai-feed", "added", "https://x/a"),
+                         pipeline.make_cid("qbitai-feed", "added", "https://x/a"))
+
+    def test_differs_by_kind_and_key(self):
+        base = pipeline.make_cid("s", "added", "k1")
+        self.assertNotEqual(base, pipeline.make_cid("s", "removed", "k1"))
+        self.assertNotEqual(base, pipeline.make_cid("s", "added", "k2"))
+        self.assertNotEqual(base, pipeline.make_cid("s2", "added", "k1"))
+
+    def test_length_12_and_no_timestamp(self):
+        cid = pipeline.make_cid("s", "added", "k")
+        self.assertEqual(len(cid), 12)
+        # 公式只含三个因子——重建结果必须与再次生成一致（无隐藏时刻成分）
+        import core as _core
+        self.assertEqual(cid, _core.sha1("s|added|k")[:12])
+
+
+class TestDemoteAlreadySent(unittest.TestCase):
+    """洁净重置防重发：--already-sent 命中的已发情报必须强制 notify=false（代码层兜底）。"""
+
+    def test_demotes_sent_intel(self):
+        intel = [{"change_id": "a", "notify": True},
+                 {"change_id": "b", "notify": True},
+                 {"change_id": "c", "discard": True, "notify": True}]
+        out, n = judge.demote_already_sent(intel, {"a"})
+        self.assertEqual(n, 1)
+        self.assertFalse(out[0]["notify"])
+        self.assertTrue(out[1]["notify"])   # 未命中保持通知
+        self.assertTrue(out[2]["notify"])   # 弃权条目不动（也不该有 notify 语义）
+
+    def test_empty_sent_ids_noop(self):
+        intel = [{"change_id": "a", "notify": True}]
+        out, n = judge.demote_already_sent(intel, set())
+        self.assertEqual(n, 0)
+        self.assertTrue(out[0]["notify"])
+
+    def test_merged_change_ids_count_as_sent(self):
+        """被合并条目也属已发：合并报道换源重现时不得重复通知（merge 语义闭环）。"""
+        # 模拟旧登记：主条记录带 merged_change_ids
+        old_log = [{"change_id": "main", "notify": True,
+                    "merged_change_ids": ["m1", "m2"]}]
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            for r in old_log:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            path = f.name
+        # 重建 sent_ids 的逻辑与 cmd_input 一致：change_id + merged_change_ids
+        sent_ids = set()
+        for r in core.read_jsonl(path):
+            if r.get("discard"):
+                continue
+            sent_ids.add(r.get("change_id"))
+            for mid in r.get("merged_change_ids") or []:
+                sent_ids.add(mid)
+        os.unlink(path)
+        intel = [{"change_id": "m1", "notify": True},   # 换源重现的被合并条目
+                 {"change_id": "new", "notify": True}]  # 真新增不受影响
+        out, n = judge.demote_already_sent(intel, sent_ids)
+        self.assertEqual(n, 1)
+        self.assertFalse(out[0]["notify"], "被合并条目换源重现必须被压制")
+        self.assertTrue(out[1]["notify"])
+
+
+class TestStripWriteback(unittest.TestCase):
+    """洁净重置复用旧登记：落盘回写字段必须自动剥离，不再被白名单拦截。"""
+
+    def test_strips_known_writeback_fields(self):
+        intel = [{"change_id": "a", "title": "T", "notify": True,
+                  "logged_at": "2026-10-26T23:54:37+08:00",
+                  "grounding": {"ok": 1},
+                  "grounding_notes": {"300": "换算"}},
+                 {"change_id": "b", "discard": True, "discard_reason": "x"}]
+        stripped = judge.strip_writeback(intel)
+        self.assertEqual(stripped, {"logged_at", "grounding", "grounding_notes"})
+        self.assertEqual(set(intel[0]), {"change_id", "title", "notify"})
+        # 二次调用（幂等）：已剥离后无字段可剥
+        self.assertEqual(judge.strip_writeback(intel), set())
+
+    def test_unknown_fields_survive_for_check_keys(self):
+        """真正未知的字段（拼写错误）不能被静默剥离——留给 check_keys 点名拦截。"""
+        intel = [{"change_id": "a", "notif": True}]  # notify 拼错
+        stripped = judge.strip_writeback(intel)
+        self.assertEqual(stripped, set())
+        self.assertIn("notif", intel[0])
+
+    def test_discard_log_structure_normalized(self):
+        """复用 discarded.jsonl 的 {change_id, reason} 结构自动归一为 judged 契约。"""
+        intel = [{"change_id": "d1", "reason": "行情噪声", "logged_at": "2026-10-26T01:00:00+08:00"}]
+        judge.strip_writeback(intel)
+        self.assertTrue(intel[0]["discard"])
+        self.assertEqual(intel[0]["discard_reason"], "行情噪声")
+        self.assertNotIn("reason", intel[0])
+        self.assertNotIn("logged_at", intel[0])
+
+
+class TestSuppressedDigestFilter(unittest.TestCase):
+    """sent-guard 压制标记：已通报内容不得被内参重新打包（洁净重置全量窗防旧闻重推）。"""
+
+    def test_demote_marks_suppressed(self):
+        intel = [{"change_id": "a", "notify": True},
+                 {"change_id": "b", "notify": True}]
+        out, n = judge.demote_already_sent(intel, {"a"})
+        self.assertEqual(n, 1)
+        self.assertTrue(out[0].get("suppressed_by_guard"), "压制记录必须带独立标记")
+        self.assertNotIn("suppressed_by_guard", out[1], "未命中记录不得误标")
+
+    def test_digest_excludes_suppressed_records(self):
+        """cmd_digest 产卡时剔除 suppressed_by_guard 记录，保留 notify=false 的归档记录。"""
+        ws = tempfile.mkdtemp(prefix="mi-digest-")
+        os.makedirs(os.path.join(ws, "log"), exist_ok=True)
+        os.makedirs(os.path.join(ws, "out"), exist_ok=True)
+        now = "2026-10-27T01:00:00+08:00"
+        recs = [
+            {"change_id": "old1", "type": "行业动态", "significance": "normal",
+             "title": "已通报旧闻", "summary": "S", "url": "https://x/1",
+             "sources": [], "notify": False, "suppressed_by_guard": True,
+             "logged_at": now},
+            {"change_id": "arc1", "type": "行业动态", "significance": "normal",
+             "title": "归档展示内容", "summary": "S", "url": "https://x/2",
+             "sources": [], "notify": False,
+             "logged_at": now},
+        ]
+        with open(os.path.join(ws, "log", "intel.jsonl"), "w") as f:
+            for r in recs:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        rc = judge.cmd_digest(ws)
+        self.assertEqual(rc, 0)
+        cards = [f for f in os.listdir(os.path.join(ws, "out")) if f.startswith("card-daily")]
+        if cards:  # 产了卡就必须不含已通报旧闻
+            text = json.dumps(json.load(open(os.path.join(ws, "out", cards[0]))),
+                              ensure_ascii=False)
+            self.assertNotIn("已通报旧闻", text, "sent-guard 压制内容不得进内参")
+            self.assertIn("归档展示内容", text, "AI 判定不通知的归档内容保留展示")
+
+
+class TestDryRun(unittest.TestCase):
+    """--dry-run 沙箱预检：全流程演练，真实工作区零写入；问题在落盘前暴露。"""
+
+    @staticmethod
+    def _mk_ws():
+        ws = tempfile.mkdtemp(prefix="mi-test-")
+        os.makedirs(os.path.join(ws, "out"), exist_ok=True)
+        changes = [{"change_id": "a1", "source_id": "s", "source_name": "测试源",
+                    "serves": ["intel"], "tier": "T2", "source_kind": "rss",
+                    "change_kind": "added", "key": "k1", "url": "https://x/1",
+                    "title": "测试标题", "summary": "测试摘要"}]
+        latest = {"run_at": "2026-10-27T00:00:00+08:00", "summary": {},
+                  "health": {}, "changes": changes}
+        with open(os.path.join(ws, "out", "latest.json"), "w") as f:
+            json.dump(latest, f, ensure_ascii=False)
+        return ws
+
+    @staticmethod
+    def _write_judged(ws, intel):
+        jp = os.path.join(ws, "judged.json")
+        with open(jp, "w") as f:
+            json.dump({"intel": intel, "facts": []}, f, ensure_ascii=False)
+        return jp
+
+    def test_dry_run_passes_and_writes_nothing_real(self):
+        ws = self._mk_ws()
+        jp = self._write_judged(ws, [{"change_id": "a1", "type": "行业动态",
+                                       "significance": "normal", "title": "测试标题",
+                                       "summary": "测试摘要", "url": "https://x/1",
+                                       "sources": [{"name": "测试源", "url": "https://x/1"}],
+                                       "notify": True, "notify_reason": "预检"}])
+        rc = judge.cmd_input(ws, jp, dry_run=True)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(os.path.join(ws, "log")),
+                         "dry-run 不得在真实工作区创建 log")
+        leftover = [f for f in os.listdir(os.path.join(ws, "out"))
+                    if f.startswith("card-")]
+        self.assertEqual(leftover, [], "dry-run 不得在真实工作区产生卡片")
+
+    def test_dry_run_catches_bad_record(self):
+        """问题判定（未知字段）在 dry-run 被拦截退出，真实工作区仍零写入。"""
+        ws = self._mk_ws()
+        jp = self._write_judged(ws, [{"change_id": "a1", "type": "行业动态",
+                                       "significance": "normal", "title": "T",
+                                       "summary": "S", "url": "https://x/1",
+                                       "sources": [], "notify": True,
+                                       "notify_reason": "r", "oops": 1}])
+        with self.assertRaises(SystemExit) as ctx:
+            judge.cmd_input(ws, jp, dry_run=True)
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertFalse(os.path.exists(os.path.join(ws, "log")))
 
 
 def _mk_out(ws):

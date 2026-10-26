@@ -55,6 +55,16 @@ def load_sources(ws):
     return sources, settings
 
 
+def make_cid(source_id, kind, key):
+    """内容寻址 change_id：源 + 种类 + 条目键 的 12 位哈希（跨轮/跨洁净重置稳定）。
+
+    不掺运行时刻——否则同一内容每轮都拿新 id，已判记录无法复用、intel.jsonl
+    幂等与 --already-sent 防重发全部失效，出窗回灌的旧文会被当新消息重复轰炸
+    （实战踩坑：量子位/36氪回灌轮只能靠 AI 逐条识别防重）。
+    """
+    return core.sha1("|".join([source_id, kind, key or ""]))[:12]
+
+
 def stale_check(sources, settings, ws, now):
     """停更检测：源最新条目距今超过阈值即在报告里点名（信源侧静默，不是脚本故障）。"""
     out = []
@@ -120,8 +130,7 @@ def run_round(ws, baseline=False):
                 for e in group:
                     if kind == "added" and do_enrich:
                         e = collect.enrich_detail(s, e, settings, enrich_budget)
-                    # change_id：源 + 种类 + 条目键 + 本轮时刻 的 12 位哈希（轮内唯一，pending 回放稳定）
-                    cid = core.sha1("|".join([s["id"], kind, e.get("key") or "", now]))[:12]
+                    cid = make_cid(s["id"], kind, e.get("key"))
                     all_changes.append(diffcore.make_change(cid, s, kind, e, now))
             diffcore.save_snapshot(ws, s["id"], entries, now)
 
