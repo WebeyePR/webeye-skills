@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Webeye CSBU AI Skills 全局技能元数据注册表",
-  "generated_at": "2026-10-26 16:12:35",
+  "generated_at": "2026-10-26 16:35:38",
   "total_skills": 16,
   "skills": [
     {
@@ -390,7 +390,7 @@
       "has_requirements": false,
       "has_package_json": false,
       "total_files": 29,
-      "total_lines": 5412
+      "total_lines": 5621
     },
     {
       "name": "webeye-kb-organizer",
