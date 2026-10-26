@@ -67,8 +67,9 @@ docker info >/dev/null 2>&1 || open -a Docker                   # daemon 不在�
 
 | 路由 | 内容 | 实测时效 | 登记状态 |
 |---|---|---|---|
-| `rsshub://36kr/newsflashes` | 36氪快讯 | ~60 分钟（缓存边界） | **enabled**（生产在用） |
+| `rsshub://36kr/newsflashes` | 36氪快讯 | ~60 分钟（缓存边界） | 本机 enabled（生产在用；模板默认禁用） |
 | `rsshub://cls/telegraph` | 财联社电报 | **2 分钟** | 备用，推荐首选启用 |
+| `rsshub://huodongxing/explore` | 活动行·最新活动 | 实测 20 条/轮，含出海峰会/短剧大会 | 本机 enabled（需求文档活动情报指定源；**只有此路由，无关键词参数**，B2B 出海筛选交给 AI 判断层） |
 | `rsshub://wallstreetcn/live/global` | 华尔街见闻·全球直播 | 1 分钟，100 条 | 备用（与财联社二选一） |
 | `rsshub://wallstreetcn/news` | 华尔街见闻·新闻 | 6 分钟 | 备用（优先 live 版） |
 | `rsshub://gelonghui/live` | 格隆汇·直播 | 0 分钟 | 备用（与财联社重叠最高） |
@@ -85,7 +86,8 @@ docker info >/dev/null 2>&1 || open -a Docker                   # daemon 不在�
 |---|---|
 | `36kr/information/web_news`（36氪文章） | 36氪网页反爬挑战（`anti-bot challenge`），快讯接口能过、文章接口过不了 |
 | `wechat/uread`、`wechat/ce`、`wechat/wewea` 等 | 免费中转 `careerengine.us` 已 404（服务死亡） |
-| `pedaily/news`、`zhidx/topic`、`huodongxing/search/:kw` | 路由名不存在（404/400），需查官方文档确认现名 |
+| `pedaily/news`、`zhidx/topic` | 路由名不存在（404），需查官方文档确认现名 |
+| `huodongxing/search/:kw` | 路由名不存在；活动行**只有 `/huodongxing/explore`**（最新活动，不支持关键词过滤），已核实可用并登记 |
 | `geekpark/top`、`geekpark/breakingnews` | 极客公园上游 API 端点 404（上游改版） |
 | `latepost/article` | 503（付费墙倾向） |
 

@@ -261,7 +261,7 @@
       "name": "AI产品榜（页面监测）",
       "kind": "web_page",
       "url": "https://www.aicpb.com/zh",
-      "enabled": false,
+      "enabled": true,
       "serves": [
         "lead"
       ],
@@ -273,7 +273,11 @@
       ],
       "windowed": false,
       "stale_after_hours": 72,
-      "notes": "2026-10-23 实测：榜单条目为 JS 渲染，纯 HTTP 抓取拿不到产品列表（首页仅导航链接）——一期禁用，二期评估无头浏览器方案。links 模式能力已就绪，静态榜单可直接启用。"
+      "notes": "2026-10-26 复核启用：页面为 Nuxt SSR，links 模式实测可解析各分榜头名（含增速榜黑马信号）。月榜低频，差分监测新上榜/登顶。",
+      "config": {
+        "mode": "links",
+        "link_pattern": "/zh/product/"
+      }
     },
     {
       "id": "example-itjuzi-mp",
@@ -457,6 +461,70 @@
       "windowed": true,
       "stale_after_hours": 168,
       "notes": "2026-10-24 实测可用但更新低频（单条可达 49 小时）。数码硬件画像弱，默认不启用。"
+    },
+    {
+      "id": "huodongxing-explore",
+      "name": "活动行·最新活动",
+      "kind": "rss",
+      "url": "rsshub://huodongxing/explore",
+      "enabled": false,
+      "serves": [
+        "intel"
+      ],
+      "tier": "T2",
+      "owner_entity": null,
+      "tags": [
+        "活动",
+        "出海",
+        "B2B"
+      ],
+      "windowed": true,
+      "stale_after_hours": 72,
+      "notes": "2026-10-26 实测可用（20 条/轮，含出海峰会/短剧大会等高命中条目）。需求文档活动情报指定信息源；无关键词过滤路由，B2B 出海筛选由 AI 判断层（activities-criteria 白名单/黑名单）承担。【默认禁用：依赖本地 RSSHub 部署】"
+    },
+    {
+      "id": "appmagic-top-charts",
+      "name": "AppMagic·应用榜单",
+      "kind": "web_page",
+      "url": "https://appmagic.rocks/top-charts/apps",
+      "enabled": false,
+      "serves": [
+        "lead"
+      ],
+      "tier": "T3",
+      "owner_entity": null,
+      "tags": [
+        "榜单",
+        "海外App"
+      ],
+      "windowed": false,
+      "stale_after_hours": 168,
+      "config": {
+        "mode": "links"
+      },
+      "notes": "2026-10-26 实测：纯 SPA 无 SSR 内容，纯 HTTP 不可行，需无头浏览器（二期）。登记留档以便复查，启用前提是有头渲染能力就绪。"
+    },
+    {
+      "id": "boss-zhipin-search",
+      "name": "BOSS直聘·职位搜索",
+      "kind": "web_page",
+      "url": "https://www.zhipin.com/web/geek/job?query=出海&city=100010000",
+      "enabled": false,
+      "serves": [
+        "lead"
+      ],
+      "tier": "T3",
+      "owner_entity": null,
+      "tags": [
+        "招聘信号",
+        "出海"
+      ],
+      "windowed": false,
+      "stale_after_hours": 168,
+      "config": {
+        "mode": "links"
+      },
+      "notes": "2026-10-26 实测评估：带完整 UA 请求职位列表页仅返回 9.6KB 空壳 SPA（无 job-card 内容），职位数据经需登录态的 API 加载且反爬强——纯 HTTP 不可行，需无头浏览器+登录态（二期）。需求文档「招聘类网站」指定源，登记留档以便复查；招聘信号当前由 example-company-careers（官网招聘页差分）与媒体报道 hiring 事实抽取承担。"
     }
   ]
 }

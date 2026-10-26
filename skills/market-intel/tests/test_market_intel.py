@@ -735,5 +735,33 @@ class TestDigestAnchor(unittest.TestCase):
         self.assertEqual(len(leads), 1)
 
 
+class TestBriefingRankSection(unittest.TestCase):
+    """内参卡「榜单监控」段（需求文档榜单监控板块）：type 含「榜单」的情报独立成段。"""
+
+    def test_rank_record_gets_dedicated_section(self):
+        recs = [{"type": "榜单新晋", "title": "NovaChat 登顶 AI产品榜出海增速榜",
+                 "summary": "本月新晋黑马，背后公司符合画像", "url": "https://aicpb.com/zh/product/x",
+                 "sources": [{"name": "AI产品榜", "url": "https://aicpb.com/zh"}]},
+                {"type": "行业趋势", "title": "普通新闻", "sources": []}]
+        els = judge._rank_elements(recs)
+        text = "".join(e.get("content", "") for e in els if e.get("tag") == "markdown")
+        self.assertIn("NovaChat", text, "榜单新晋情报必须进榜单监控段")
+        self.assertNotIn("普通新闻", text, "非榜单情报不得混入榜单段")
+
+    def test_briefing_has_rank_heading_only_with_data(self):
+        rec_rank = [{"type": "榜单新晋", "title": "X 新上榜", "summary": "s",
+                     "url": "https://a", "sources": []}]
+        card = judge.briefing_card(rec_rank, [])
+        heads = [e["content"] for e in card["body"]["elements"]
+                 if e.get("tag") == "markdown" and "榜单监控" in e.get("content", "")]
+        self.assertTrue(heads, "有榜单情报时内参卡必须有「榜单监控」段标题")
+        # 无榜单数据：不出现该段（占位空段不许出现）
+        card2 = judge.briefing_card([{"type": "行业趋势", "title": "t", "summary": "s",
+                                      "url": "https://b", "sources": []}], [])
+        heads2 = [e["content"] for e in card2["body"]["elements"]
+                  if e.get("tag") == "markdown" and "榜单监控" in e.get("content", "")]
+        self.assertFalse(heads2, "无榜单数据时不得渲染空榜单段")
+
+
 if __name__ == "__main__":
     unittest.main()

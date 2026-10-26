@@ -274,7 +274,7 @@ def write_card(ws, name, card):
     return path
 
 
-# ---------- 内参卡（需求文档三段式版式：活动日历 / 行业重点新闻 / 潜在客户与业务情报） ----------
+# ---------- 内参卡（需求文档版式：活动日历 / 行业重点新闻 / 榜单监控 / 潜在客户与业务情报） ----------
 
 # 头图与图标 img_key 复用需求文档卡片 JSON 里的既有素材（飞书 image key 租户级通用）
 BRIEFING_IMGS = {
@@ -337,6 +337,29 @@ def _news_elements(records, limit=3):
     return els
 
 
+def _rank_elements(records, limit=4):
+    """榜单监控段（需求文档「榜单监控」板块）：榜单新晋/黑马信号 + 背后公司画像结论。
+
+    数据来源：judged 里 type 含「榜单」的情报记录（判断准则约定榜单新晋统一标
+    type=「榜单新晋」）。「排除长久霸榜、只看新上榜」的语义在源侧差分（links 模式
+    基线有本轮新出现 = added）与 AI 判断（rank_new_entry kind）两处已保证，这里只做展示。
+    """
+    els = []
+    shown = [r for r in records if not r.get("discard") and "榜单" in (r.get("type") or "")]
+    shown.sort(key=lambda r: SIG_ORDER.get(r.get("significance"), 3))
+    for r in shown[:limit]:
+        els.append({"tag": "markdown",
+                    "content": "<font color='red'>**🏆 %s**</font>" % (r.get("title") or "")})
+        if r.get("summary"):
+            els.append({"tag": "markdown", "content": r["summary"], "text_size": "notation"})
+        if r.get("sources"):
+            els.append({"tag": "markdown", "content": _sources_line(r["sources"]),
+                        "text_size": "notation"})
+        if r.get("url"):
+            els.append(_button("查看榜单原文", r["url"]))
+    return els
+
+
 def _lead_elements(leads, limit=3, view_url=None):
     """潜在客户段：公司名按钮 + 文档字段式描述 + 猎隼线索池登记按钮（record 级定位）。
 
@@ -373,7 +396,8 @@ def _lead_elements(leads, limit=3, view_url=None):
 
 
 def briefing_card(records, leads, view_url=None):
-    """需求文档三段式内参卡。三段全空返回 None（当天无内容不产空卡）。"""
+    """需求文档版式内参卡：活动日历 / 行业重点新闻 / 榜单监控（有数据才出现）/ 潜在客户与业务情报。
+    全空返回 None（当天无内容不产空卡）。"""
     body = [{"tag": "img", "img_key": BRIEFING_IMGS["banner"], "preview": True,
              "transparent": False, "scale_type": "fit_horizontal",
              "alt": {"tag": "plain_text", "content": "市场团队内参"},
@@ -382,11 +406,17 @@ def briefing_card(records, leads, view_url=None):
     if act_els:
         body.append(_section_heading("📅 WebEye活动日历"))
         body += act_els
-    news_els = _news_elements([r for r in records if r.get("type") != "活动情报"])
+    news_els = _news_elements([r for r in records if r.get("type") != "活动情报"
+                               and "榜单" not in (r.get("type") or "")])
     if news_els:
         body.append({"tag": "hr"})
         body.append(_section_heading("🔥 行业重点新闻"))
         body += news_els
+    rank_els = _rank_elements(records)
+    if rank_els:
+        body.append({"tag": "hr"})
+        body.append(_section_heading("🏆 榜单监控（新晋黑马）"))
+        body += rank_els
     lead_els = _lead_elements(leads, view_url=view_url)
     if lead_els:
         body.append({"tag": "hr"})
