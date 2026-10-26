@@ -762,6 +762,17 @@ class TestBriefingRankSection(unittest.TestCase):
                   if e.get("tag") == "markdown" and "榜单监控" in e.get("content", "")]
         self.assertFalse(heads2, "无榜单数据时不得渲染空榜单段")
 
+    def test_rank_section_has_explainer(self):
+        """段标题下必须有释义行：读者不知道「榜单监控」盯的是海外软件榜单新晋黑马。"""
+        recs = [{"type": "榜单新晋", "title": "X 新上榜", "summary": "s",
+                 "url": "https://a", "sources": []}]
+        card = judge.briefing_card(recs, [])
+        els = card["body"]["elements"]
+        text = "".join(e.get("content", "") for e in els if e.get("tag") == "markdown")
+        self.assertIn("海外软件榜单", text, "段标题应点明监控对象是海外软件榜单")
+        self.assertIn("排除长久霸榜", text, "释义必须说明「排除霸榜、只看新晋」语义")
+        self.assertIn("画像", text, "释义必须说明要调研背后公司是否符合画像")
+
 
 if __name__ == "__main__":
     unittest.main()

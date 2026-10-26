@@ -415,7 +415,11 @@ def briefing_card(records, leads, view_url=None):
     rank_els = _rank_elements(records)
     if rank_els:
         body.append({"tag": "hr"})
-        body.append(_section_heading("🏆 榜单监控（新晋黑马）"))
+        body.append(_section_heading("🏆 榜单监控｜海外软件榜单·新晋黑马"))
+        body.append({"tag": "markdown",
+                     "content": "监控海外软件榜单（AI产品榜、AppMagic 等）新上榜/登顶的黑马产品"
+                                "——排除长久霸榜，只看新晋；并调研背后公司是否符合 WebEye 潜在客户画像。",
+                     "text_size": "notation"})
         body += rank_els
     lead_els = _lead_elements(leads, view_url=view_url)
     if lead_els:
