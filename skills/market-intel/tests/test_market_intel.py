@@ -774,5 +774,39 @@ class TestBriefingRankSection(unittest.TestCase):
         self.assertIn("画像", text, "释义必须说明要调研背后公司是否符合画像")
 
 
+class TestEnrichDetail(unittest.TestCase):
+    """活动行详情页富化：RSS feed 只有标题+链接，时间/地点须从详情页 ativityJson 补全。"""
+
+    FIXTURE = '''var ativityJson = {"Id":7877592160200,"Title":"AI文娱（短剧）产业生态大会",
+        "Start":"\\\\/Date(1793838600000)\\\\/","End":"\\\\/Date(1793959200000)\\\\/",
+        "StartShort":"11/05 08:30","EndShort":"11/06 18:00","City":"杭州",
+        "Address":"白马湖国际会展中心·B馆3楼","Tag":"文博会,文化产业","MaxInstance":2000,
+        "InstanceNumber":410,"Organizers":[{"Id":1,"Name":"短剧自习室"}]};'''
+
+    def test_enrich_fills_time_location(self):
+        entry = {"title": "AI文娱（短剧）产业生态大会", "link": "https://www.huodongxing.com/event/1",
+                 "published": None, "summary": "", "text": ""}
+        out = collect.enrich_huodongxing(entry, self.FIXTURE)
+        self.assertEqual(out["published"], "2026-11-05 08:30", "开始时间须解析为北京时间 ISO")
+        self.assertIn("时间：2026-11-05 08:30 ~ 11-06 18:00", out["summary"])
+        self.assertIn("地点：杭州 · 白马湖国际会展中心·B馆3楼", out["summary"])
+        self.assertIn("主办方：短剧自习室", out["summary"])
+        self.assertIn("报名规模：410/2000", out["summary"], "报名规模是热度信号")
+
+    def test_enrich_failure_keeps_entry(self):
+        entry = {"title": "t", "link": "x", "published": None, "summary": "原摘要", "text": ""}
+        for bad in ["<html>无 JSON</html>", 'var ativityJson = {broken;', 'var ativityJson = {"Start":"xx"};']:
+            out = collect.enrich_huodongxing(dict(entry), bad)
+            self.assertEqual(out["summary"], "原摘要", "解析失败必须原样返回，富化是增益不是门槛")
+
+    def test_enrich_detail_dispatch_and_budget(self):
+        entry = {"title": "t", "link": "https://example.com/x", "published": None, "summary": "", "text": ""}
+        # 非活动行域名不分发，不消耗配额
+        budget = [3]
+        out = collect.enrich_detail({"config": {"detail_enrich": True}}, entry, {}, budget)
+        self.assertEqual(budget[0], 3, "无 enricher 的域名不消耗抓取配额")
+        self.assertEqual(out["summary"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

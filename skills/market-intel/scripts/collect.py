@@ -17,10 +17,12 @@
 - 单域名限流 + 整轮壁钟上限，超时未返回的源判失败并继续。
 """
 
+import json
 import re
 import threading
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin as _urljoin, urlparse
 
 import core
@@ -185,6 +187,107 @@ def _page_links(body, spec, cfg):
         if len(entries) >= max_items:
             break
     return entries
+
+
+# ---------- 详情页富化（detail_enrich 源配置驱动） ----------
+
+# 活动行详情页内嵌 var ativityJson = {...}（站点源码就少拼一个 c，实测如此）：
+# 起止时间（ASP.NET \/Date(ts)\/ 写法）、城市/地址/标签/主办方齐全——RSS feed 本身
+# 只有标题+链接（实测 description 为空），时间地点必须富化补全，否则卡片只能写「见报名页」。
+_HDX_ACT_RE = re.compile(r"ivityJson\s*=\s*\{", re.S)
+_HDX_DATE_RE = re.compile(r"\\?/Date\((\d{13})\)\\?/")
+
+
+def _hdx_date(text):
+    m = _HDX_DATE_RE.search(text or "")
+    if not m:
+        return None
+    dt = datetime.fromtimestamp(int(m.group(1)) / 1000, tz=timezone(timedelta(hours=8)))
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def _balanced_json(text, start):
+    """从 text[start]=='{' 起做括号配对，返回平衡的 JSON 子串（字符串内的括号不计数）。"""
+    depth, in_str, esc = 0, False, False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+def enrich_huodongxing(entry, body):
+    """活动行详情页富化：解析 ativityJson，把时间/地点/主办方/标签写进 entry。
+
+    解析失败原样返回（AI 判断时仍可写「见报名页」并注明原因）——富化是增益不是门槛。
+    """
+    m = _HDX_ACT_RE.search(body or "")
+    if not m:
+        return entry
+    raw = _balanced_json(body, m.end() - 1)
+    if not raw:
+        return entry
+    try:
+        data = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return entry
+    start, end = _hdx_date(data.get("Start")), _hdx_date(data.get("End"))
+    if not start:
+        return entry
+    time_text = start if not end else "%s ~ %s" % (start, end[5:])
+    where = " · ".join(x for x in [data.get("City"), data.get("Address")] if x) or "线上/待公布"
+    lines = ["时间：%s" % time_text, "地点：%s" % where]
+    organizers = data.get("Organizers")
+    if isinstance(organizers, list) and organizers:
+        names = "、".join(str(o.get("Name")) for o in organizers[:3]
+                          if isinstance(o, dict) and o.get("Name"))
+        if names:
+            lines.append("主办方：%s" % names)
+    # 报名规模是热度信号（已报/上限），判断「重点活动」时可参考
+    if data.get("MaxInstance"):
+        lines.append("报名规模：%s/%s" % (data.get("InstanceNumber") or 0, data["MaxInstance"]))
+    if data.get("Tag"):
+        lines.append("标签：%s" % data["Tag"])
+    old_summary = entry.get("summary") or ""
+    entry["summary"] = "\n".join(lines + ([old_summary] if old_summary else []))
+    entry["published"] = start
+    entry["text"] = "\n".join(x for x in [entry.get("title"), entry["summary"], start] if x)
+    return entry
+
+
+_ENRICHERS = {"huodongxing.com": enrich_huodongxing}
+
+
+def enrich_detail(spec, entry, settings, budget):
+    """对单条 added 条目做详情页富化（spec.config.detail_enrich: true 时由管线调用）。
+
+    budget: 剩余抓取配额列表 [n]（可变共享，单轮上限防超时）；失败静默返回原条目。
+    """
+    host = urlparse(entry.get("link") or "").netloc.replace("www.", "")
+    fn = _ENRICHERS.get(host)
+    if fn is None or budget[0] <= 0:
+        return entry
+    budget[0] -= 1
+    try:
+        timeout = int(settings.get("request_timeout_seconds", 30))
+        body = core.fetch(entry["link"], timeout=timeout, retries=0)
+        return fn(entry, body)
+    except Exception:  # noqa: BLE001
+        return entry
 
 
 # ---------- 适配器注册表 ----------

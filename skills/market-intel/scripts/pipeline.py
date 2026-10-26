@@ -112,8 +112,14 @@ def run_round(ws, baseline=False):
                                   {"source_id": s["id"], "key": e.get("key"), "title": e.get("title"),
                                    "url": e.get("link"), "at": now})
             rolled += rolled_entries
+            # 详情页富化：detail_enrich 源的新增条目抓详情页补全时间/地点（活动行场景）。
+            # 只富化进变更的副本，快照仍存 RSS 原始条目（键与差分语义不受富化影响）。
+            enrich_budget = [int(settings.get("detail_enrich_max_per_round", 12))]
+            do_enrich = bool((s.get("config") or {}).get("detail_enrich"))
             for kind, group in (("added", added), ("removed", removed)):
                 for e in group:
+                    if kind == "added" and do_enrich:
+                        e = collect.enrich_detail(s, e, settings, enrich_budget)
                     # change_id：源 + 种类 + 条目键 + 本轮时刻 的 12 位哈希（轮内唯一，pending 回放稳定）
                     cid = core.sha1("|".join([s["id"], kind, e.get("key") or "", now]))[:12]
                     all_changes.append(diffcore.make_change(cid, s, kind, e, now))
