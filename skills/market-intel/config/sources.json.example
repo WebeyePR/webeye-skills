@@ -181,7 +181,7 @@
     },
     {
       "id": "zhidx-page",
-      "name": "智东西（页面监测）",
+      "name": "智东西",
       "kind": "web_page",
       "url": "https://www.zhidx.com/",
       "enabled": true,
@@ -207,7 +207,7 @@
     },
     {
       "id": "brandark-page",
-      "name": "品牌方舟（页面监测）",
+      "name": "品牌方舟",
       "kind": "web_page",
       "url": "https://www.brandark.com/",
       "enabled": true,
@@ -233,7 +233,7 @@
     },
     {
       "id": "pedaily-invest-page",
-      "name": "投资界·投融资（页面监测）",
+      "name": "投资界·投融资",
       "kind": "web_page",
       "url": "https://vc.pedaily.cn/invest",
       "enabled": true,
@@ -258,7 +258,7 @@
     },
     {
       "id": "aicpb-rank-page",
-      "name": "AI产品榜（页面监测）",
+      "name": "AI产品榜",
       "kind": "web_page",
       "url": "https://www.aicpb.com/zh",
       "enabled": true,
@@ -297,32 +297,6 @@
       "windowed": true,
       "stale_after_hours": 336,
       "notes": "不可用（2026-10-24 核实）：wechat/uread 路由依赖的免费中转 careerengine.us 已 404。恢复途径见 references/rsshub-sources.md 微信路由一节（wechat2rss 公共版未收录 IT桔子 / 自部署 wewe-rss 需扫码占用微信号）。"
-    },
-    {
-      "id": "example-company-careers",
-      "name": "示例：某公司官网招聘页（页面监测）",
-      "kind": "web_page",
-      "url": "https://example-company.com/about/careers",
-      "enabled": false,
-      "serves": [
-        "lead"
-      ],
-      "tier": "T1",
-      "owner_entity": "example-company",
-      "tags": [
-        "招聘信号"
-      ],
-      "windowed": false,
-      "stale_after_hours": null,
-      "config": {
-        "keywords": [
-          "算法工程师",
-          "大模型",
-          "后端开发",
-          "增长运营"
-        ]
-      },
-      "notes": "官网招聘页差分：config.keywords 里列出的关键词在页面出现/消失时各产出一条变更（岗位新增/下线是最强的业务扩张信号）。owner_entity 指向词表里的公司，档案直接归到它名下。示例域名为占位，使用时替换为真实目标公司招聘页。"
     },
     {
       "id": "cls-telegraph",
@@ -529,6 +503,46 @@
         "mode": "links"
       },
       "notes": "2026-10-26 实测评估：带完整 UA 请求职位列表页仅返回 9.6KB 空壳 SPA（无 job-card 内容），职位数据经需登录态的 API 加载且反爬强——纯 HTTP 不可行，需无头浏览器+登录态（二期）。需求文档「招聘类网站」指定源，登记留档以便复查；招聘信号当前由 example-company-careers（官网招聘页差分）与媒体报道 hiring 事实抽取承担。"
+    },
+    {
+      "id": "deepseek-news",
+      "name": "DeepSeek 官方动态（RSSHub 自部署）",
+      "kind": "rss",
+      "url": "rsshub://deepseek/news",
+      "enabled": true,
+      "serves": [
+        "intel"
+      ],
+      "tier": "T1",
+      "owner_entity": "deepseek",
+      "tags": [
+        "国内模型",
+        "竞对",
+        "价格战"
+      ],
+      "windowed": true,
+      "stale_after_hours": 168,
+      "notes": "国内核心模型重点盯防（2026-10-27 用户明令）：新模型/降价必须第一时间推送。RSSHub 路由实测可用（19 条）。"
+    },
+    {
+      "id": "qwen-blog",
+      "name": "通义千问 Qwen 官方博客（RSSHub 自部署）",
+      "kind": "rss",
+      "url": "rsshub://qwen/blog",
+      "enabled": true,
+      "serves": [
+        "intel"
+      ],
+      "tier": "T1",
+      "owner_entity": "qwen",
+      "tags": [
+        "国内模型",
+        "竞对",
+        "价格战"
+      ],
+      "windowed": true,
+      "stale_after_hours": 168,
+      "notes": "阿里通义千问/Qwen 官方动态（2026-10-27 用户明令重点盯防）。RSSHub 路由实测可用（40 条）。"
     }
   ]
 }

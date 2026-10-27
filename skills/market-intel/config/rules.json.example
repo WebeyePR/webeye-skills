@@ -4,7 +4,16 @@
   "scope": {
     "industry": {
       "type": "industry_tag",
-      "any_of": ["游戏", "电商", "AI硬件", "应用", "具身智能", "智能制造", "短剧", "互联网"],
+      "any_of": [
+        "游戏",
+        "电商",
+        "AI硬件",
+        "应用",
+        "具身智能",
+        "智能制造",
+        "短剧",
+        "互联网"
+      ],
       "_comment": "需求文档八行业。AI 公司按主营形态标「应用」或「AI硬件」；天然出海的行业在词表标「短剧出海」。"
     },
     "origin": {
@@ -26,7 +35,25 @@
         {
           "type": "funding_event",
           "within_days": 30,
-          "_comment": "文档口径：近 1 个月内有新投融资信息即 P0（金额轮次不限）。投融资动态是最高权重信源。"
+          "_comment": "2026-10-27 用户明令：只要种子~B 轮的成长型出海团队。C轮及以上/战略融资/并购一律不推送（已上市企业由 denylist 拦截）。",
+          "round_any": [
+            "种子轮",
+            "种子",
+            "天使轮",
+            "天使",
+            "Pre-A轮",
+            "Pre-A",
+            "PreA",
+            "A轮",
+            "A+轮",
+            "A+",
+            "Pre-B轮",
+            "Pre-B",
+            "PreB",
+            "B轮",
+            "B+轮",
+            "B+"
+          ]
         }
       ]
     },
@@ -39,7 +66,18 @@
         {
           "type": "funding_event",
           "within_days": 180,
-          "round_any": ["种子轮", "天使轮", "Pre-A轮", "Pre-A", "A轮", "A+轮", "Pre-B轮", "Pre-B", "B轮", "B+轮"],
+          "round_any": [
+            "种子轮",
+            "天使轮",
+            "Pre-A轮",
+            "Pre-A",
+            "A轮",
+            "A+轮",
+            "Pre-B轮",
+            "Pre-B",
+            "B轮",
+            "B+轮"
+          ],
           "_comment": "文档口径：重点关注种子轮到 B 轮（拿钱后 3~6 个月启动扩张、IT 预算最宽裕）。半年窗口内的早期轮次也升 P0。"
         }
       ]
@@ -52,7 +90,9 @@
       "all_of": [
         {
           "type": "other_event",
-          "kind_any": ["business_surge"],
+          "kind_any": [
+            "business_surge"
+          ],
           "within_days": 90,
           "_comment": "客户介绍类通稿中的业务数据暴增（用户/收入/订单激增、大力投产销），AI 判断时标 kind=business_surge。"
         }
@@ -66,7 +106,9 @@
       "all_of": [
         {
           "type": "other_event",
-          "kind_any": ["product_launch"],
+          "kind_any": [
+            "product_launch"
+          ],
           "within_days": 60,
           "_comment": "发布新产品/新版主产品大更新，AI 判断时标 kind=product_launch。"
         }
@@ -80,7 +122,9 @@
       "all_of": [
         {
           "type": "other_event",
-          "kind_any": ["rank_new_entry"],
+          "kind_any": [
+            "rank_new_entry"
+          ],
           "within_days": 60,
           "_comment": "海外软件榜单新晋（AI产品榜/AppMagic 等，排除霸榜只看新上榜），由榜单页面差分自动产出或 AI 判断标注。"
         }
@@ -95,7 +139,13 @@
         {
           "type": "hiring",
           "within_days": 30,
-          "keywords_any": ["出海", "跨境", "全球化", "海外", "云成本"],
+          "keywords_any": [
+            "出海",
+            "跨境",
+            "全球化",
+            "海外",
+            "云成本"
+          ],
           "_comment": "文档口径：招聘出现明显出海、云成本关键词的企业（新官上任同理，AI 判断时入 hiring 信号）。"
         }
       ]
@@ -109,7 +159,25 @@
         {
           "type": "funding_event",
           "within_days": 180,
-          "_comment": "半年内融过资但无近 1 月新信号：满足画像的储备线索，P1 只入池与日报，不实时通知。"
+          "_comment": "2026-10-27 用户明令：只要种子~B 轮的成长型出海团队。C轮及以上/战略融资/并购一律不推送（已上市企业由 denylist 拦截）。",
+          "round_any": [
+            "种子轮",
+            "种子",
+            "天使轮",
+            "天使",
+            "Pre-A轮",
+            "Pre-A",
+            "PreA",
+            "A轮",
+            "A+轮",
+            "A+",
+            "Pre-B轮",
+            "Pre-B",
+            "PreB",
+            "B轮",
+            "B+轮",
+            "B+"
+          ]
         }
       ]
     }
