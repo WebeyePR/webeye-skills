@@ -66,6 +66,29 @@ class TestLoadSources(unittest.TestCase):
             self.assertEqual(by_id["web"], "https://example.com/a")  # 非 rsshub:// 原样保留
 
 
+class TestParseIso(unittest.TestCase):
+    """时间解析必须同时兼容 ISO 8601 与 RSS 原生 RFC 2822（2026-10-27 事故回归）。"""
+
+    def test_rfc2822_gmt(self):
+        ts = core.parse_iso("Mon, 26 Oct 2026 18:11:43 GMT")
+        self.assertIsNotNone(ts, "RSS 原生 RFC 2822 时间必须可解析")
+
+    def test_rfc2822_numeric_offset(self):
+        a = core.parse_iso("Tue, 27 Oct 2026 10:34:24 +0800")
+        b = core.parse_iso("2026-10-27T10:34:24+08:00")
+        self.assertIsNotNone(a)
+        self.assertEqual(a, b, "RFC 2822 与等价 ISO 必须得到同一时间戳")
+
+    def test_iso_still_works(self):
+        self.assertIsNotNone(core.parse_iso("2026-10-27T02:34:24Z"))
+        self.assertIsNotNone(core.parse_iso("2026-10-27T10:34:24+08:00"))
+
+    def test_garbage_returns_none(self):
+        self.assertIsNone(core.parse_iso("garbage"))
+        self.assertIsNone(core.parse_iso(""))
+        self.assertIsNone(core.parse_iso(None))
+
+
 class TestParseFeed(unittest.TestCase):
     FEED = """<?xml version="1.0"?><rss version="2.0"><channel>
       <item><title>A</title><link>https://x.com/post/1</link><pubDate>Mon, 20 Oct 2026 08:00:00 GMT</pubDate><description>正文A</description></item>
@@ -203,6 +226,345 @@ class TestEntity(unittest.TestCase):
         eid, rec = facts_mod.normalize_entity("某新公司X", self.ENT)
         self.assertTrue(eid.startswith("unknown:"))
         self.assertEqual(rec["name"], "某新公司X")
+
+
+class TestFundingDateStrict(unittest.TestCase):
+    """within_days 时效判定：日期不可解析时不得当成"近期"命中（2026-10-27 修复）。
+
+    旧实现 `if within and ts and ...` —— ts 为 None 时整条时效判断被跳过，
+    "去年10月"这类不可解析的旧融资会被当成"近 30 天内融资"命中 P0 线索。
+    线索误报会让市场同事建联扑空，比漏报更伤信任，故按保守处理（不命中）。
+    """
+
+    COND = {"within_days": 30}
+
+    def test_unparseable_date_not_hit(self):
+        """不可解析日期（中文表述）→ 不满足时效，不命中。"""
+        fact = {"funding_events": [{"date": "去年10月", "round": "B轮",
+                                    "amount_text": "3亿元"}]}
+        hit, _ = match_mod.ev_funding(self.COND, fact)
+        self.assertFalse(hit, "无法解析的日期不得当成近期融资命中")
+
+    def test_old_iso_date_not_hit(self):
+        """一年前的 ISO 日期 → 超出 within_days，不命中。"""
+        fact = {"funding_events": [{"date": "2025-10-01", "round": "B轮",
+                                    "amount_text": "3亿元"}]}
+        hit, _ = match_mod.ev_funding(self.COND, fact)
+        self.assertFalse(hit)
+
+    def test_recent_date_still_hit(self):
+        """近 5 天的融资照常命中（修复不许误伤正常路径）。"""
+        import datetime
+        recent = (datetime.datetime.now() - datetime.timedelta(days=5)).strftime("%Y-%m-%d")
+        fact = {"funding_events": [{"date": recent, "round": "B轮",
+                                    "amount_text": "3亿元"}]}
+        hit, detail = match_mod.ev_funding(self.COND, fact)
+        self.assertTrue(hit, "近期融资必须命中")
+        self.assertIn("B轮", detail)
+
+    def test_no_within_days_ignores_date(self):
+        """未设 within_days 时不做时效过滤（历史档案查询场景照常返回）。"""
+        fact = {"funding_events": [{"date": "去年10月", "round": "B轮",
+                                    "amount_text": "3亿元"}]}
+        hit, _ = match_mod.ev_funding({}, fact)
+        self.assertTrue(hit, "无时效要求时不应因日期不可解析而漏掉")
+
+
+class TestDenylist(unittest.TestCase):
+    """绝对负向黑名单（2026-10-27 用户明令）：命中即硬丢弃，绝不推巨头/服务商/晚期融资。
+
+    用户原话："你总是在给我推希音（SHEIN）、钛动、声网这类人尽皆知的大巨头或
+    出海成熟服务商……推这些大厂对我来说纯属噪音。"
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        import tempfile
+        self.ws = tempfile.mkdtemp(prefix="mi-deny-")
+        os.makedirs(self.ws, exist_ok=True)
+        # 用内置模板（真实名单，不 mock）
+        self.deny = match_mod.load_denylist(self.ws)
+
+    def _hit(self, name, aliases=None, events=None, **kw):
+        fact = {"name": name, "aliases": aliases or [], "funding_events": events or []}
+        fact.update(kw)
+        return match_mod.check_denylist(fact, self.deny)
+
+    def test_super_giants_blocked(self):
+        """超级巨头/独角兽一律命中。"""
+        for name in ("希音", "字节跳动", "拼多多", "腾讯", "米哈游", "莉莉丝",
+                     "月之暗面", "DeepSeek", "小米"):
+            hit, why = self._hit(name)
+            self.assertTrue(hit, "%s 应被黑名单拦截" % name)
+            self.assertIn("超级巨头", why)
+
+    def test_service_providers_blocked(self):
+        """成熟出海服务商/友商（生态伙伴，非买云直客）一律命中。"""
+        for name in ("声网", "钛动科技", "白鲸出海", "PingPong", "连连支付", "店匠"):
+            hit, why = self._hit(name)
+            self.assertTrue(hit, "%s 应被黑名单拦截（服务商/友商）" % name)
+            self.assertIn("服务商", why)
+
+    def test_alias_also_blocked(self):
+        """别名命中同样拦截（SHEIN / Kimi / Moonshot 等）。"""
+        hit, _ = self._hit("某某科技", aliases=["SHEIN"])
+        self.assertTrue(hit, "别名含 SHEIN 也应拦截")
+
+    def test_late_round_blocked(self):
+        """C 轮及以上 / 战略融资 / IPO 一律命中（只要种子~B 轮）。"""
+        for rnd in ("C轮", "C+轮", "D轮", "E轮", "F轮", "Pre-IPO", "战略融资"):
+            hit, why = self._hit("某成长公司", events=[{"round": rnd}])
+            self.assertTrue(hit, "%s 应被轮次拦截" % rnd)
+            self.assertIn("轮次", why)
+
+    def test_target_round_not_blocked(self):
+        """种子~B 轮的目标客群不得被误伤（修复不许误杀）。"""
+        for rnd in ("种子轮", "天使轮", "Pre-A轮", "A轮", "A+轮", "Pre-B轮", "B轮", "B+轮"):
+            hit, _ = self._hit("某成长公司", events=[{"round": rnd}])
+            self.assertFalse(hit, "%s 属于目标轮次，不该被拦" % rnd)
+
+    def test_no_round_not_blocked(self):
+        """轮次缺失不因轮次否决（可能只是报道没写）。"""
+        hit, _ = self._hit("某成长公司", events=[])
+        self.assertFalse(hit)
+
+    def test_target_company_passes(self):
+        """真实目标客群（早期轮次小公司）不得被拦。"""
+        for name in ("橘猫宇宙", "湃岛科技", "Ambi", "光启之境"):
+            hit, why = self._hit(name, events=[{"round": "Pre-A轮"}])
+            self.assertFalse(hit, "%s 是目标客群，不该被拦（%s）" % (name, why))
+
+
+class TestDenylistDefaultFallback(unittest.TestCase):
+    """黑名单的「默认就有保护」四层语义（2026-10-27 用户注 2）。
+
+    用户原话：「denylist.json 可以复制一个作为默认模板，如果用户不反对或没有则默认
+    使用这个」。落点是：**用户不配也必须被过滤**，同时保留「我想清空」的出口。
+
+    历史坑：工作区文件存在但名单为空（`{"version":1}` / `deny_entities: []`）时
+    直接返回空名单 → **静默零过滤** → 巨头又被当线索推，正是用户抱怨的场景复现。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        self.ws = tempfile.mkdtemp(prefix="mi-dldef-")
+        core.workspace(self.ws)
+
+    def _load(self):
+        return match_mod.load_denylist(self.ws)
+
+    def _write(self, content):
+        p = os.path.join(self.ws, "denylist.json")
+        if isinstance(content, str):
+            open(p, "w", encoding="utf-8").write(content)
+        else:
+            core.jdump(p, content)
+
+    def test_01_no_file_uses_builtin(self):
+        """① 工作区无文件 → 开箱即用内置默认（117 巨头）。"""
+        d = self._load()
+        self.assertGreaterEqual(len(d.get("deny_entities") or []), 100,
+                                "无文件时必须回退内置默认，不能零过滤")
+        self.assertTrue(d.get("deny_by_round"), "轮次口径也要有默认")
+
+    def test_02_empty_object_fills_builtin(self):
+        """② 空对象 → 自动补内置默认（防「配了文件却零过滤」）。"""
+        self._write({"version": 1})
+        d = self._load()
+        self.assertGreaterEqual(len(d.get("deny_entities") or []), 100)
+
+    def test_03_empty_arrays_filled(self):
+        """③ 显式空数组 → 同样补默认（这是最容易被误认为"已清空"的写法）。"""
+        self._write({"version": 1, "deny_entities": [], "deny_by_round": []})
+        d = self._load()
+        self.assertGreaterEqual(len(d.get("deny_entities") or []), 100)
+
+    def test_04_user_content_wins(self):
+        """④ 用户给了内容 → 用用户的，不掺默认（该维度）。"""
+        self._write({"version": 1, "deny_entities": ["只测这家"],
+                     "deny_service_providers": ["也测这家"],
+                     "deny_by_round": ["C轮"], "allow_round": ["A轮"]})
+        d = self._load()
+        self.assertEqual(d["deny_entities"], ["只测这家"], "用户名单必须原样保留")
+        self.assertEqual(d["deny_by_round"], ["C轮"])
+
+    def test_05_explicit_off_really_clears(self):
+        """⑤ 显式 use_builtin_default=false → 真正清空（保留出口）。"""
+        self._write({"version": 1, "use_builtin_default": False,
+                     "deny_entities": [], "deny_by_round": []})
+        d = self._load()
+        self.assertEqual(d.get("deny_entities"), [], "显式关闭后必须真清空")
+
+    def test_06_broken_json_falls_back(self):
+        """⑥ 文件损坏 → 回退内置默认（不能因坏文件失去过滤）。"""
+        self._write("{ 坏掉的 json")
+        d = self._load()
+        self.assertGreaterEqual(len(d.get("deny_entities") or []), 100)
+
+    def test_07_user_named_companies_all_hit(self):
+        """用户点名的巨头/服务商必须全部命中（含别名路径）。"""
+        d = self._load()
+        cases = [("希音", ["SHEIN"]), ("字节跳动", ["ByteDance"]), ("拼多多", ["Temu"]),
+                 ("阿里", ["Alibaba"]), ("腾讯", ["Tencent"]), ("网易", ["NetEase"]),
+                 ("米哈游", ["miHoYo"]), ("莉莉丝", ["Lilith"]), ("声网", ["Agora"]),
+                 ("钛动", ["Tec-Do"]), ("白鲸出海", []), ("赤子城", []),
+                 ("PingPong", []), ("连连", ["连连支付"]), ("飞书深诺", []),
+                 ("店匠", ["Shoplazza"])]
+        miss = []
+        for name, aliases in cases:
+            hit, _ = match_mod.check_denylist({"name": name, "aliases": aliases}, d)
+            if not hit:
+                miss.append(name)
+        self.assertEqual(miss, [], "以下用户点名的公司未被拦截: %s" % miss)
+
+
+class TestDenylistOnPoolEntry(unittest.TestCase):
+    """入池前黑名单复检（2026-10-27 补）：build_pending 必须重算黑名单。
+
+    事故场景：上一轮就已产出、尚未写入的 pending 线索，若公司后来被用户加入
+    `denylist.json`（实测：声网、C 轮公司），旧实现只在 `judge.cmd_input` 生成
+    线索时检查——`build_pending` 自称"按当前规则重算匹配"却只重算 scope，
+    这些线索会被 `--bitable --commit` 直接写进线索池，违背「命中即硬丢弃」。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        self.ws = tempfile.mkdtemp(prefix="mi-deny-pool-")
+        core.workspace(self.ws)
+        for f in ("rules.json", "entities.json"):
+            core.jdump(os.path.join(self.ws, f), core.jload(
+                os.path.join(core.SCRIPT_DIR, "..", "config", f + ".example"), None))
+        core.jdump(os.path.join(self.ws, "denylist.json"), core.jload(
+            os.path.join(core.SCRIPT_DIR, "..", "config", "denylist.json.example"), None))
+        core.jdump(os.path.join(self.ws, "out", "latest.json"),
+                   {"run_at": core.now_iso(), "changes": [], "summary": {}})
+        self.cfg = {"enabled": True, "app_token": "x", "table_id": "y", "field_map": {}}
+
+    def _seed(self, lid, eid, name, rnd):
+        core.append_jsonl(os.path.join(self.ws, "log", "leads.jsonl"), {
+            "lead_id": lid, "entity_id": eid, "entity_name": name,
+            "priority": "P0", "score": 90, "matched_groups": ["p0-funding-recent"],
+            "matched_group_names": ["近1月融资"], "industries": ["应用"],
+            "bitable_status": "pending", "logged_at": core.now_iso()})
+        core.jdump(os.path.join(self.ws, "facts", eid + ".json"), {
+            "entity_id": eid, "name": name, "aliases": [], "industries": ["应用"],
+            "origin": "CN", "going_global": True,
+            "funding_events": [{"date": core.now_iso()[:10], "round": rnd,
+                                "amount_text": "1亿元"}]})
+        core.append_jsonl(os.path.join(self.ws, "log", "enrichments.jsonl"), {
+            "entity_id": eid, "entity_name": name,
+            "fields": {k: "x" for k in ["profile", "business", "funding", "investors",
+                                        "financials", "tech_stack", "ceo", "size",
+                                        "founded", "city", "contact", "website",
+                                        "opportunity"]} | {"icebreaker": "x" * 100}})
+
+    def test_denied_lead_excluded_from_pending(self):
+        """黑名单公司（调研齐全）不得进入待写队列。"""
+        import bitable
+        self._seed("L1", "agora", "声网", "A轮")
+        self._seed("L2", "cat", "橘猫宇宙", "Pre-A轮")
+        items = bitable.build_pending(self.ws, self.cfg)
+        names = [i["company"] for i in items]
+        self.assertEqual(names, ["橘猫宇宙"], "声网应被入池前复检拦下")
+        rows = {r["lead_id"]: r for r in core.read_jsonl(
+            os.path.join(self.ws, "log", "leads.jsonl"))}
+        self.assertEqual(rows["L1"]["bitable_status"], "filtered")
+        self.assertIn("黑名单", rows["L1"]["bitable_note"])
+
+    def test_late_round_lead_excluded(self):
+        """C 轮公司同样在入池前复检被拦（轮次属黑名单口径）。"""
+        import bitable
+        self._seed("L3", "grow", "某C轮公司", "C轮")
+        items = bitable.build_pending(self.ws, self.cfg)
+        self.assertEqual(items, [], "C 轮公司不该进待写队列")
+
+
+class TestSalesGuidance(unittest.TestCase):
+    """销售指引强制字段（2026-10-27 用户明令）：技术战报必带 sales_playbook、
+    战略风向必带 sales_strategy，缺则拒落盘（exit 2）。
+
+    用户原话："行业新闻太泛，缺少真正的销售弹药"——没有销售动作的资讯 = 噪音。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        import tempfile
+        self.ws = tempfile.mkdtemp(prefix="mi-sales-")
+        core.workspace(self.ws)
+        for f in ("rules.json", "entities.json"):
+            core.jdump(os.path.join(self.ws, f), core.jload(
+                os.path.join(core.SCRIPT_DIR, "..", "config", f + ".example"), None))
+        core.jdump(os.path.join(self.ws, "notify.json"),
+                   {"version": 1, "notify": {"user_id": "ou_x", "chat_id": "oc_x", "mention": ""}})
+        core.jdump(os.path.join(self.ws, "out", "latest.json"),
+                   {"run_at": core.now_iso(), "changes": [], "summary": {}})
+
+    def _run(self, rec):
+        jp = os.path.join(self.ws, "judged.json")
+        core.jdump(jp, {"intel": [rec], "facts": []})
+        return judge.cmd_input(self.ws, jp)
+
+    def test_tech_brief_without_playbook_rejected(self):
+        """技术战报 notify=true 但缺 sales_playbook → exit 2 拒落盘。"""
+        rec = {"change_id": "x1", "type": "技术战报", "significance": "high",
+               "title": "某模型降价 40%", "summary": "API 价格下调。",
+               "url": "https://e/1", "notify": True}
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(rec)
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_tech_brief_with_short_playbook_rejected(self):
+        """空话（"我们更稳定更安全"）字数不足 → 同样拒。"""
+        rec = {"change_id": "x2", "type": "技术战报", "significance": "high",
+               "title": "某模型降价", "summary": "s", "url": "https://e/1",
+               "notify": True, "sales_playbook": "我们更稳定更安全"}
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(rec)
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_tech_brief_with_playbook_passes(self):
+        """合格 sales_playbook → 正常落盘并渲染进卡片。"""
+        rec = {"change_id": "x3", "type": "技术战报", "significance": "high",
+               "title": "某模型降价 40%", "summary": "API 价格下调。",
+               "url": "https://e/1", "notify": True,
+               "sales_playbook": ("竞对降价 40% 后客户必拿价格说事。防守：算总成本不只看 token 单价，"
+                                  "骨干网直连让跨区时延低 30%+；合规杠杆用本地 Region 数据驻留。"
+                                  "话术：单价贵一点，但你少两个合规风险。")}
+        self.assertEqual(self._run(rec), 0)
+        cards = [f for f in os.listdir(os.path.join(self.ws, "out")) if f.startswith("card-")]
+        blob = "".join(open(os.path.join(self.ws, "out", c), encoding="utf-8").read()
+                       for c in cards)
+        self.assertIn("销售对标指引", blob, "sales_playbook 必须渲染进卡片，不能只在 JSON 里")
+
+    def test_strategy_without_guidance_rejected(self):
+        """战略风向 notify=true 但缺 sales_strategy → exit 2。"""
+        rec = {"change_id": "x4", "type": "战略风向", "significance": "high",
+               "title": "中东短剧增长 120%", "summary": "s", "url": "https://e/1",
+               "notify": True}
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(rec)
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_strategy_with_guidance_passes(self):
+        """合格 sales_strategy → 落盘并渲染。"""
+        rec = {"change_id": "x5", "type": "战略风向", "significance": "high",
+               "title": "中东短剧增长 120%", "summary": "s", "url": "https://e/1",
+               "notify": True,
+               "sales_strategy": ("中东短剧暴涨 → 客户要同时解决多区域低延迟与当地内容合规。"
+                                  "本周重点抓中东短剧出海团队（刚拿 A/B 轮正在铺量的），"
+                                  "主推多区域边缘节点 + 数据驻留合规组合方案。")}
+        self.assertEqual(self._run(rec), 0)
+        cards = [f for f in os.listdir(os.path.join(self.ws, "out")) if f.startswith("card-")]
+        blob = "".join(open(os.path.join(self.ws, "out", c), encoding="utf-8").read()
+                       for c in cards)
+        self.assertIn("销售战略建议", blob)
+
+    def test_notify_false_needs_no_guidance(self):
+        """notify=false 的归档记录不要求销售指引（不强迫为归档编话术）。"""
+        rec = {"change_id": "x6", "type": "技术战报", "significance": "low",
+               "title": "某小更新", "summary": "s", "url": "https://e/1",
+               "notify": False}
+        self.assertEqual(self._run(rec), 0)
 
 
 class TestRules(unittest.TestCase):
@@ -366,6 +728,41 @@ class TestParseWebPage(unittest.TestCase):
         self.assertEqual([e["key"] for e in entries], ["kw:大模型"])
 
 
+class TestNewSourceBaseline(unittest.TestCase):
+    """新源首次抓取只建基线，不产变更（2026-10-27 实测修复，用户"线索严重过时"根因）。
+
+    未修复时：新加一个源会把它的全部历史文章（DeepSeek 19 条 + Qwen 40 条，
+    最早到 2024-07）当 added 灌进判定窗，用户看到的就是"严重过时的旧闻当新动态"。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        import tempfile
+        self.ws = tempfile.mkdtemp(prefix="mi-newsrc-")
+        os.makedirs(os.path.join(self.ws, "state", "streams"), exist_ok=True)
+        os.makedirs(os.path.join(self.ws, "log"), exist_ok=True)
+        os.makedirs(os.path.join(self.ws, "out"), exist_ok=True)
+
+    def test_no_snapshot_means_baseline_only(self):
+        """无 prev 快照 = 新源 → 落基线后跳过，不产变更。"""
+        import pipeline
+        entries = [{"key": "k%d" % i, "title": "历史旧文%d" % i,
+                    "link": "https://e/%d" % i, "published": "2024-07-25T00:00:00+00:00",
+                    "summary": "", "text": "t%d" % i} for i in range(5)]
+        # 模拟：无 prev
+        prev = diffcore.load_snapshot(self.ws, "brand-new-source")
+        self.assertEqual(prev, {}, "新源应当没有 prev 快照")
+        # 修复逻辑：prev 为空 → 只存快照，不进 diff
+        if not prev:
+            diffcore.save_snapshot(self.ws, "brand-new-source", entries, core.now_iso())
+        after = diffcore.load_snapshot(self.ws, "brand-new-source")
+        self.assertEqual(len(after), 5, "新源首次抓取必须落基线快照")
+        # 第二轮：基线已在，历史条目不算新增
+        added, removed, rolled = diffcore.diff_source(after, entries, windowed=True)
+        self.assertEqual(added, [], "第二轮对同一批历史条目不得报 added")
+        self.assertEqual(removed, [])
+
+
 class TestDiff(unittest.TestCase):
     def _e(self, key, pub):
         return {"key": key, "title": key, "link": "https://a/%s" % key, "published": pub,
@@ -387,6 +784,81 @@ class TestDiff(unittest.TestCase):
         added, removed, rolled = diffcore.diff_source(prev, [], windowed=False)
         self.assertEqual([e["key"] for e in removed], ["old"])
         self.assertEqual(rolled, [])
+
+    def test_full_window_rotation_is_rolled(self):
+        """满窗等量替换（定长窗口 10 进 10 出）→ 消失必为挤出，全判滚动。
+
+        2026-10-27 实测事故回归：量子位 RSS 是定长 10 条窗口，每轮 10 进 10 出，
+        旧实现依赖 `pub < oldest_cur`，而该源返回非严格时序（含推荐位混排），
+        条件永不成立 → 每轮 10 条 removed 噪音进判定窗。
+        """
+        prev = {k: self._e(k, "Mon, 26 Oct 2026 09:00:00 +0000")
+                for k in ("a", "b", "c", "d")}
+        cur = [self._e(k, "Tue, 27 Oct 2026 09:00:00 +0000")
+               for k in ("c", "d", "e", "f")]
+        added, removed, rolled = diffcore.diff_source(prev, cur, windowed=True)
+        self.assertEqual(sorted(e["key"] for e in added), ["e", "f"])
+        self.assertEqual(removed, [], "满窗等量替换时消失条目全为挤出，不得判 removed")
+        self.assertEqual(sorted(e["key"] for e in rolled), ["a", "b"])
+
+    def test_shrink_with_stale_entry_is_rolled(self):
+        """收缩但消失条目早于窗口最旧条目 → 仍判滚动（旧闻被挤出）。"""
+        prev = {"old": self._e("old", "Mon, 01 Sep 2026 00:00:00 +0000"),
+                "mid": self._e("mid", "Mon, 26 Oct 2026 00:00:00 +0000")}
+        cur = [self._e("mid", "Mon, 26 Oct 2026 00:00:00 +0000")]
+        added, removed, rolled = diffcore.diff_source(prev, cur, windowed=True)
+        self.assertEqual(removed, [])
+        self.assertEqual([e["key"] for e in rolled], ["old"])
+
+    def test_shrink_recent_entry_is_removed(self):
+        """收缩且消失条目时间不旧 → 保守判 removed（宁可多报，不吞真消失）。"""
+        prev = {"recent": self._e("recent", "Tue, 27 Oct 2026 09:00:00 +0000"),
+                "other": self._e("other", "Tue, 27 Oct 2026 09:00:00 +0000")}
+        cur = [self._e("other", "Tue, 27 Oct 2026 09:00:00 +0000")]
+        added, removed, rolled = diffcore.diff_source(prev, cur, windowed=True)
+        self.assertEqual([e["key"] for e in removed], ["recent"])
+        self.assertEqual(rolled, [])
+
+    def test_small_jitter_treated_as_roll(self):
+        """列表页条数小幅抖动（±10%）不算真收缩 —— 2026-10-27 活动行实测。
+
+        真实事故：活动行列表页条数在 20/21 之间随机抖动（备份 20、本轮 21），
+        旧实现用绝对比较 `len(cur) < len(prev)` → 1 条差异就判「源真变少」
+        → 4 条消失全判 removed 噪音，违反 SOP「真增量轮 removed 应为 0」。
+        容差按比例 10%：21 → 容差 2，缺口 1 ≤ 2 视为抖动 → 判 rolled。
+        且该源 published 几乎全为 None，时间比较本就恒不成立。
+        """
+        prev = {f"k{i}": self._e(f"k{i}", None) for i in range(21)}
+        cur = [self._e(f"k{i}", None) for i in range(3, 21)] + \
+              [self._e("new1", None), self._e("new2", None), self._e("new3", None)]
+        added, removed, rolled = diffcore.diff_source(prev, cur, windowed=True)
+        self.assertEqual(len(removed), 0, "小幅抖动不应产 removed")
+        self.assertEqual(len(rolled), 3, "消失条目应判窗口滚动")
+        self.assertEqual(len(added), 3)
+
+    def test_real_shrink_without_timestamp_rolls(self):
+        """明显收缩但条目无时间戳 → 判 rolled（无时间证据不主张真消失）。"""
+        prev = {f"k{i}": self._e(f"k{i}", None) for i in range(20)}
+        cur = [self._e(f"k{i}", None) for i in range(10, 20)]   # 20 → 10，缺口超容差
+        added, removed, rolled = diffcore.diff_source(prev, cur, windowed=True)
+        self.assertEqual(len(removed), 0, "无时间戳时不该主张真消失")
+        self.assertEqual(len(rolled), 10)
+
+    def test_windowed_roll_with_rfc2822_published(self):
+        """RSS 原生 RFC 2822 时间也必须能识别窗口滚动（2026-10-27 实测事故回归）。
+
+        真实事故：parse_iso 只认 ISO 8601，RSS 的 `Mon, 26 Oct 2026 18:11:43 GMT`
+        解析成 None → oldest_cur/pub 全为 None → 窗口滚动分支永不成立 → 每轮
+        几十条滚动条目被判「真的消失」进变更窗。本条用 RFC 2822 时间复现同一场景。
+        """
+        prev = {"old": self._e("old", "Mon, 26 Oct 2026 18:11:43 GMT"),
+                "mid": self._e("mid", "Tue, 27 Oct 2026 06:00:00 GMT")}
+        cur = [self._e("mid", "Tue, 27 Oct 2026 06:00:00 GMT"),
+               self._e("new", "Tue, 27 Oct 2026 09:30:00 GMT")]
+        added, removed, rolled = diffcore.diff_source(prev, cur, windowed=True)
+        self.assertEqual([e["key"] for e in added], ["new"])
+        self.assertEqual(removed, [], "RFC 2822 时间下早于窗口的条目必须判滚动，不得进 removed")
+        self.assertEqual([e["key"] for e in rolled], ["old"])
 
 
 class TestCoverage(unittest.TestCase):
@@ -446,21 +918,26 @@ class TestEndToEnd(unittest.TestCase):
                      "url": "https://q/2", "sources": [{"name": "量子位", "url": "https://q/2"}],
                      "notify": True, "notify_reason": "行业政策"}],
                 "facts": [
-                    {"entity_name": "月之暗面", "aliases": ["Kimi"], "industries": ["AI"],
+                    # 用目标客群（早期轮次的小公司）而非月之暗面——后者已在黑名单
+                    # （超级巨头/独角兽），会被 denylist 硬丢弃（2026-10-27 用户明令）
+                    {"entity_name": "橘猫宇宙", "aliases": [],
+                     "industries": ["AI硬件", "游戏"], "origin": "CN", "going_global": True,
                      "event_type": "funding",
-                     "event": {"date": core.now_iso()[:10], "round": "B轮", "amount_text": "3亿美元",
-                               "investors": "某基金", "source_name": "量子位", "source_url": "https://q/1"},
+                     "event": {"date": core.now_iso()[:10], "round": "Pre-A轮",
+                               "amount_text": "3000万元",
+                               "investors": "某基金", "source_name": "量子位",
+                               "source_url": "https://q/1"},
                      "change_ids": ["chg1"], "confidence": "high"}]}
             jp = os.path.join(ws, "judged.json")
             core.jdump(jp, judged)
             rc = judge.cmd_input(ws, jp)
             self.assertEqual(rc, 0)
             # 档案与线索
-            fact = facts_mod.load_fact(ws, "moonshot")
+            fact = facts_mod.load_fact(ws, "unknown:橘猫宇宙")
             self.assertEqual(len(fact["funding_events"]), 1)
             leads = core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))
             self.assertEqual(len(leads), 1)
-            # v2 口径：月之暗面（词表 origin=CN/going_global）今日 B 轮融资 → P0 双组命中
+            # v2 口径：橘猫宇宙（origin=CN/going_global）Pre-A 轮融资 → P0 双组命中
             self.assertIn("p0-funding-recent", leads[0]["matched_groups"])
             self.assertEqual(leads[0]["priority"], "P0")
             self.assertGreaterEqual(leads[0]["score"], 60)
@@ -470,6 +947,55 @@ class TestEndToEnd(unittest.TestCase):
                                   if f.startswith("card-")]) >= 2, True)
             pending = core.jload(diffcore.pending_path(ws), {"items": []})
             self.assertEqual(pending["items"], [])
+
+
+class TestAlreadySentMissingPost(unittest.TestCase):
+    """重判已落盘记录时不得漏发（2026-10-27 实测漏发，v0.5.1 修复）。
+
+    真实事故：上轮落盘 notify=true 但未发（锚点未推进），本轮带 --already-sent
+    重判同一 change_id。旧实现 `if change_id in seen_intel: continue` 跳过该记录，
+    内存里的 rec 不加入 notified_intel → 卡片里没有它 → **永久漏发**；
+    而 sent-guard 若把 notify 压成 false，则连下一轮也不会再发。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        self.ws = tempfile.mkdtemp(prefix="mi-resend-")
+        core.workspace(self.ws)
+        core.jdump(os.path.join(self.ws, "rules.json"),
+                   core.jload(os.path.join(core.SCRIPT_DIR, "..", "config",
+                                           "rules.json.example"), None))
+        core.jdump(os.path.join(self.ws, "entities.json"),
+                   core.jload(os.path.join(core.SCRIPT_DIR, "..", "config",
+                                           "entities.json.example"), None))
+        core.jdump(os.path.join(self.ws, "notify.json"),
+                   {"version": 1, "notify": {"user_id": "ou_x", "chat_id": "oc_x", "mention": ""}})
+        core.jdump(os.path.join(self.ws, "out", "latest.json"),
+                   {"run_at": core.now_iso(), "changes": [], "summary": {}})
+        # 已落盘但未发：notify=true，无 suppressed_by_guard
+        core.append_jsonl(os.path.join(self.ws, "log", "intel.jsonl"),
+                          {"change_id": "pending1", "type": "融资动态",
+                           "title": "上轮落盘未发的情报", "summary": "s", "url": "https://e/1",
+                           "notify": True, "significance": "high",
+                           "logged_at": "2026-10-27T11:00:00+08:00"})
+
+    def test_existing_notify_record_reaches_card(self):
+        """已落盘 + 仍 notify=true 的记录必须进入 notified_intel（不得被 skip 吞掉）。"""
+        jp = os.path.join(self.ws, "judged.json")
+        core.jdump(jp, {"intel": [{"change_id": "pending1", "type": "融资动态",
+                                   "title": "上轮落盘未发的情报", "summary": "s",
+                                   "url": "https://e/1", "notify": True,
+                                   "significance": "high"}], "facts": []})
+        # already_sent 指向同一文件但用 sent_before 把它排开（=确实没发过）
+        judge.cmd_input(self.ws, jp, already_sent=os.path.join(self.ws, "log", "intel.jsonl"),
+                        sent_before="2026-10-27T10:00:00+08:00")
+        cards = [f for f in os.listdir(os.path.join(self.ws, "out")) if f.startswith("card-")]
+        self.assertTrue(cards, "应产出卡片")
+        blob = ""
+        for c in cards:
+            blob += open(os.path.join(self.ws, "out", c), encoding="utf-8").read()
+        self.assertIn("上轮落盘未发的情报", blob,
+                      "未发过的记录必须出现在卡片里——被 seen_intel 跳掉就是漏发")
 
 
 class TestBitable(unittest.TestCase):
@@ -835,6 +1361,293 @@ class TestDigestAnchor(unittest.TestCase):
         self.assertTrue(cards, "连用 --commit 也必须产出摘要卡，不许静默跳过")
         anchor = core.jload(os.path.join(self.ws, "state", "digest_anchor.json"), {}).get("anchor")
         self.assertEqual(anchor, "2026-10-23T21:00:00+08:00", "产卡后锚点正常推进")
+
+    def test_commit_marks_window_records_as_sent(self):
+        """锚点推进时必须给窗口内记录补 suppressed_by_guard（2026-10-27 实测缺口）。
+
+        旧实现只改 anchor 不打标 → 记录永远留着 notify=true 且无「已通报」标记。
+        平时无害（锚点之后才进窗口），但锚点一旦重置/回滚，它们会以旧闻身份
+        重新推进内参卡（旧闻重推）。锚点覆盖 = 已随内参发出，两件事必须原子完成。
+        """
+        with open(os.path.join(self.ws, "log", "intel.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"change_id": "old", "type": "融资事件",
+                                "title": "窗口内已发情报", "summary": "s", "url": "u",
+                                "notify": True, "significance": "high",
+                                "logged_at": "2026-10-23T08:00:00+08:00"},
+                               ensure_ascii=False) + "\n")
+            f.write(json.dumps({"change_id": "future", "type": "融资事件",
+                                "title": "窗口外未发情报", "summary": "s", "url": "u",
+                                "notify": True, "significance": "high",
+                                "logged_at": "2026-10-24T08:00:00+08:00"},
+                               ensure_ascii=False) + "\n")
+        # 锚点在 10-23 08:00 之前 → old 在窗口内，future 也在窗口内；
+        # 用 mark_sent 显式验证：推进后窗口内记录全部被打标
+        judge._advance_anchor(self.ws, None, "2026-10-27T10:00:00+08:00", mark_sent=True)
+        rows = {r["change_id"]: r for r in core.read_jsonl(
+            os.path.join(self.ws, "log", "intel.jsonl"))}
+        self.assertTrue(rows["old"].get("suppressed_by_guard"),
+                        "锚点推进覆盖的记录必须补「已通报」标记")
+        self.assertFalse(rows["old"].get("notify"), "已通报记录的 notify 应压为 False")
+        self.assertTrue(rows["future"].get("suppressed_by_guard"))
+
+    def test_commit_marks_record_exactly_on_anchor(self):
+        """logged_at 恰好等于锚点的记录也必须补标（2026-10-27 实测边界缺陷）。
+
+        旧实现用 `ts > anchor_ts`（严格大于）→ 落在锚点上的记录永远补不上标，
+        停在 notify=true 且无 suppressed_by_guard：digest 窗口用 `> anchor` 同样
+        排除它（当前不重推），但锚点一旦回滚它就变成漏网旧闻。实测 6 条历史情报
+        正是此状态。锚点语义是「已覆盖到的时刻」，边界包含，故用 >=。
+        """
+        T = "2026-10-27T11:18:50+08:00"
+        with open(os.path.join(self.ws, "log", "intel.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"change_id": "on_anchor", "type": "融资事件",
+                                "title": "落盘时刻恰等于锚点", "summary": "s", "url": "u",
+                                "notify": True, "significance": "high",
+                                "logged_at": T}, ensure_ascii=False) + "\n")
+        judge._advance_anchor(self.ws, T, "2026-10-27T12:00:00+08:00", mark_sent=True)
+        r = core.read_jsonl(os.path.join(self.ws, "log", "intel.jsonl"))[0]
+        self.assertTrue(r.get("suppressed_by_guard"),
+                        "logged_at == 锚点 的记录必须补标（边界包含）")
+        self.assertFalse(r.get("notify"))
+
+
+class TestHeroImage(unittest.TestCase):
+    """内参自定义头图：img_key 直通 / 本地路径上传缓存 / 三级优先级 / 异常回退。"""
+
+    def setUp(self):
+        import tempfile
+        self.ws = tempfile.mkdtemp(prefix="mi-hero-")
+        os.makedirs(os.path.join(self.ws, "state"), exist_ok=True)
+        core.jdump(os.path.join(self.ws, "notify.json"),
+                   {"notify": {"user_id": "ou_x", "chat_id": "oc_x"}})
+
+    def test_img_key_passthrough(self):
+        """CLI 传入现成 img_v3 key → 直通不触碰上传。"""
+        self.assertEqual(judge.resolve_banner_key(self.ws, "img_v3_abc"), "img_v3_abc")
+
+    def test_notify_hero_image_config(self):
+        """notify.hero_image 配置 img_v3 key（未传 CLI 参数）→ 生效（配置单源）。"""
+        core.jdump(os.path.join(self.ws, "notify.json"),
+                   {"notify": {"user_id": "ou_x", "chat_id": "oc_x",
+                               "hero_image": "img_v3_from_config"}})
+        self.assertEqual(judge.resolve_banner_key(self.ws), "img_v3_from_config")
+
+    def test_cli_overrides_notify(self):
+        """CLI --hero-image 优先于 notify.hero_image。"""
+        core.jdump(os.path.join(self.ws, "notify.json"),
+                   {"notify": {"user_id": "ou_x", "chat_id": "oc_x",
+                               "hero_image": "img_v3_from_config"}})
+        self.assertEqual(judge.resolve_banner_key(self.ws, "img_v3_from_cli"),
+                         "img_v3_from_cli")
+
+    def test_local_path_upload_and_cache(self):
+        """本地路径 → 上传换 key 并写缓存；同图第二次命中缓存不再上传。"""
+        import hashlib, tempfile
+        f = os.path.join(self.ws, "banner.png")
+        open(f, "wb").write(b"png-bytes")
+        calls = []
+        orig = judge._upload_hero_image
+        judge._upload_hero_image = lambda p: calls.append(p) or "img_v3_uploaded"
+        try:
+            self.assertEqual(judge.resolve_banner_key(self.ws, f), "img_v3_uploaded")
+            self.assertEqual(len(calls), 1)
+            # 缓存生效
+            self.assertEqual(judge.resolve_banner_key(self.ws, f), "img_v3_uploaded")
+            self.assertEqual(len(calls), 1, "同图第二次必须命中缓存，不得重复上传")
+            cache = core.jload(os.path.join(self.ws, "state", "hero_images.json"), {})
+            self.assertEqual(cache[hashlib.sha1(b"png-bytes").hexdigest()],
+                             "img_v3_uploaded")
+        finally:
+            judge._upload_hero_image = orig
+
+    def test_missing_file_falls_back(self):
+        """路径不存在 → 返回 None 回退默认头图（不阻断产卡）。"""
+        self.assertIsNone(judge.resolve_banner_key(self.ws, "/nonexistent/banner.png"))
+
+    def test_upload_failure_falls_back(self):
+        """上传失败 → 返回 None 回退默认头图，不抛异常。"""
+        orig = judge._upload_hero_image
+        judge._upload_hero_image = lambda p: None
+        try:
+            f = os.path.join(self.ws, "banner.png")
+            open(f, "wb").write(b"x")
+            self.assertIsNone(judge.resolve_banner_key(self.ws, f))
+        finally:
+            judge._upload_hero_image = orig
+
+    def test_extract_image_key_from_various_forms(self):
+        """纯函数：从飞书图片链接/混杂文本提取 image_key；普通 URL 提不出。"""
+        self.assertEqual(
+            judge._extract_image_key("https://example.feishu.cn/space/api/img_v3_0216s_4204751b-aa/x"),
+            "img_v3_0216s_4204751b-aa")
+        self.assertEqual(
+            judge._extract_image_key("就用这张 img_v3_02ba_abcdef-12 谢谢"),
+            "img_v3_02ba_abcdef-12")
+        self.assertIsNone(judge._extract_image_key("https://pics.example.com/banner.png"))
+        self.assertIsNone(judge._extract_image_key(""))
+
+    def test_feishu_link_embedded_key_passthrough(self):
+        """飞书图片链接（内嵌 key）→ 提取直通，不下载不上传。"""
+        url = "https://example.feishu.cn/file/img_v3_0216s_4204751b-aa-11"
+        calls = []
+        orig = judge._upload_hero_image
+        judge._upload_hero_image = lambda p: calls.append(p) or "should_not_call"
+        try:
+            self.assertEqual(judge.resolve_banner_key(self.ws, url),
+                             "img_v3_0216s_4204751b-aa-11")
+            self.assertEqual(calls, [], "内嵌 key 链接必须直通，不得触碰上传")
+        finally:
+            judge._upload_hero_image = orig
+
+    def test_http_url_download_and_upload(self):
+        """http 图片链接 → mock 下载 + mock 上传 → 换 key；URL 二次命中缓存。"""
+        import hashlib, tempfile
+        url = "https://pics.example.com/event-banner.png"
+        dl = []
+        def fake_download(u, dst):
+            dl.append(u)
+            open(dst, "wb").write(b"downloaded-banner-bytes")
+        calls = []
+        orig_dl, orig_up = judge._download_image, judge._upload_hero_image
+        judge._download_image = fake_download
+        judge._upload_hero_image = lambda p: calls.append(p) or "img_v3_from_url"
+        try:
+            self.assertEqual(judge.resolve_banner_key(self.ws, url), "img_v3_from_url")
+            self.assertEqual(dl, [url])
+            self.assertEqual(judge.resolve_banner_key(self.ws, url), "img_v3_from_url")
+            self.assertEqual(len(dl), 1, "同 URL 第二次必须命中 URL 缓存，不再下载")
+            cache = core.jload(os.path.join(self.ws, "state", "hero_images.json"), {})
+            self.assertEqual(cache["url:" + hashlib.sha1(url.encode()).hexdigest()],
+                             "img_v3_from_url")
+        finally:
+            judge._download_image, judge._upload_hero_image = orig_dl, orig_up
+
+    def test_http_url_download_failure_falls_back(self):
+        """图片链接下载失败 → 明确回退默认图，不抛异常不阻断产卡。"""
+        def boom(u, dst):
+            raise RuntimeError("network down")
+        orig_dl, orig_up = judge._download_image, judge._upload_hero_image
+        judge._download_image = boom
+        judge._upload_hero_image = lambda p: "never"
+        try:
+            self.assertIsNone(judge.resolve_banner_key(self.ws, "https://x.y/z.png"))
+        finally:
+            judge._download_image, judge._upload_hero_image = orig_dl, orig_up
+
+    def test_mixed_text_embedded_key_fallback(self):
+        """非路径非链接的混杂文本 → 尽力提取内嵌 key 兜底。"""
+        self.assertEqual(judge.resolve_banner_key(self.ws, "头图用 img_v3_02ba_abcdef-12 这张"),
+                         "img_v3_02ba_abcdef-12")
+
+    def test_briefing_card_uses_custom_banner(self):
+        """briefing_card 接收 banner_key 时覆盖默认头图。"""
+        recs = [{"type": "行业趋势", "title": "测试动态", "notify": True,
+                 "sources": [{"name": "s", "url": "https://x"}]}]
+        card = judge.briefing_card(recs, [], banner_key="img_v3_custom")
+        first_img = card["body"]["elements"][0]
+        self.assertEqual(first_img["img_key"], "img_v3_custom")
+        # 不传时用默认
+        card2 = judge.briefing_card(recs, [])
+        self.assertEqual(card2["body"]["elements"][0]["img_key"],
+                         judge.BRIEFING_IMGS["banner"])
+
+
+class TestNewsLimits(unittest.TestCase):
+    """notify=true 的新闻不得被 limit 截断（2026-10-27 实测漏发，陷阱 45）。
+
+    实测：02:40 轮 86 条曾通知的非活动情报，卡片只展示 3 条 → 83 条因锚点推进
+    `logged_at` 早于新锚点而永久漏发。活动段当初因同一原因把 limit 3→8，
+    新闻段漏了同样的修复。
+    """
+
+    def _shown_titles(self, els):
+        txt = json.dumps(els, ensure_ascii=False)
+        return txt
+
+    def test_all_notify_records_shown_beyond_limit(self):
+        """5 条 notify=true（limit=3）→ 必须全部展示，不得截断。"""
+        recs = [{"type": "融资动态", "title": "情报%d" % i, "summary": "s",
+                 "url": "https://e/%d" % i, "notify": True, "significance": "normal"}
+                for i in range(1, 6)]
+        blob = self._shown_titles(judge._news_elements(recs))
+        for i in range(1, 6):
+            self.assertIn("情报%d" % i, blob, "notify=true 的第 %d 条不许被截断" % i)
+
+    def test_archive_records_still_limited(self):
+        """notify=false 属归档语义，仍按 limit 少量补充，不无限膨胀。"""
+        recs = ([{"type": "a", "title": "通知1", "notify": True, "significance": "normal"}]
+                + [{"type": "a", "title": "归档%d" % i, "notify": False,
+                    "significance": "low"} for i in range(1, 11)])
+        blob = self._shown_titles(judge._news_elements(recs))
+        shown_archive = sum(1 for i in range(1, 11) if "归档%d" % i in blob)
+        self.assertLessEqual(shown_archive, 3, "归档记录应按 limit 收敛")
+        self.assertIn("通知1", blob)
+
+    def test_rank_elements_exempt_notify_from_limit(self):
+        """榜单段同纪律：notify=true 不得被 limit=4 截断（陷阱 46）。"""
+        recs = [{"type": "榜单新晋", "title": "榜单%d" % i, "notify": True,
+                 "significance": "normal"} for i in range(1, 7)]
+        blob = json.dumps(judge._rank_elements(recs), ensure_ascii=False)
+        for i in range(1, 7):
+            self.assertIn("榜单%d" % i, blob, "榜单 notify=true 的第 %d 条不许截断" % i)
+
+    def test_rank_elements_archive_still_limited(self):
+        """榜单归档记录仍按 limit 收敛，不无限膨胀。"""
+        recs = [{"type": "榜单新晋", "title": "归档%d" % i, "notify": False,
+                 "significance": "low"} for i in range(1, 9)]
+        blob = json.dumps(judge._rank_elements(recs), ensure_ascii=False)
+        shown = sum(1 for i in range(1, 9) if "归档%d" % i in blob)
+        self.assertLessEqual(shown, 4, "归档榜单应按 limit=4 收敛")
+
+    def test_notify_sorted_before_archive(self):
+        """notify=true 排在前（high 优先），归档在后。"""
+        recs = [{"type": "a", "title": "低价值归档", "notify": False, "significance": "high"},
+                {"type": "a", "title": "要通知的", "notify": True, "significance": "normal"}]
+        blob = self._shown_titles(judge._news_elements(recs))
+        self.assertLess(blob.index("要通知的"), blob.index("低价值归档"))
+
+
+class TestHighlightPrefix(unittest.TestCase):
+    """活动 highlight 不得渲染成「看点：看点：…」（2026-10-27 实测 18 条受污染）。
+
+    根因：契约示例把「看点：」写进了 highlight 值里，AI 照填；渲染层又自动加
+    `**看点：**` 标签 → 双重前缀。契约示例已改，渲染层同步兜底剥离既有前缀。
+    """
+
+    def _render(self, highlight):
+        recs = [{"type": "活动情报", "title": "测试活动", "notify": True,
+                 "significance": "normal",
+                 "activity": {"name": "某种活动", "time": "2026-10-30 14:00",
+                              "location": "广州", "highlight": highlight}}]
+        card = judge.briefing_card(recs, [])
+        def walk(o):
+            if isinstance(o, dict):
+                if o.get("tag") == "markdown":
+                    yield o["content"]
+                else:
+                    for v in o.values():
+                        yield from walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    yield from walk(v)
+        return "\n".join(walk(card))
+
+    def test_prefix_already_in_data_stripped(self):
+        """数据自带「看点：」→ 剥离，不出现双重前缀。"""
+        txt = self._render("看点：Meta 官方出海体验")
+        self.assertNotIn("看点：看点", txt)
+        self.assertIn("**看点：** Meta 官方出海体验", txt)
+
+    def test_prefix_with_space_and_fullwidth_colon(self):
+        """全角冒号/带空格的变体也要剥离。"""
+        for variant in ("看点: 内容A", "看点 ：内容B", " 看点： 内容C"):
+            txt = self._render(variant)
+            self.assertNotIn("看点：看点", txt)
+
+    def test_normal_highlight_untouched(self):
+        """正常数据不被误伤。"""
+        txt = self._render("面向跨境卖家的实操分享")
+        self.assertIn("**看点：** 面向跨境卖家的实操分享", txt)
 
 
 class TestBriefingRankSection(unittest.TestCase):
@@ -1512,6 +2325,263 @@ class TestSuppressedDigestFilter(unittest.TestCase):
             self.assertIn("归档展示内容", text, "AI 判定不通知的归档内容保留展示")
 
 
+class TestColdStartVsNewSource(unittest.TestCase):
+    """冷启动（全新环境）必须产变更，不能因"无 prev"把整轮判成 baseline。
+
+    2026-10-27 回归事故：陷阱 50 的 `if not prev` 是**逐源**判断，
+    全新环境里所有源都没有快照 → 全部只建基线 → `total=0`，
+    与 SOP「全量首扫产出全量变更」直接矛盾（实测 16 源 256 条全被吞）。
+    判别标准：本轮开始前 `state/streams/` 一个快照都没有 = 冷启动 → 产变更；
+    有别的源快照、只本源没有 = 老环境加新源 → 只建基线（陷阱 50 原意）。
+    """
+
+    def _mk(self, name, has_other_snapshot):
+        ws = tempfile.mkdtemp(prefix="mi-cold-")
+        os.makedirs(os.path.join(ws, "state", "streams"), exist_ok=True)
+        if has_other_snapshot:
+            core.jdump(os.path.join(ws, "state", "streams", "existing.json"),
+                       {"entries": [{"key": "old", "title": "旧"}]})
+        return ws
+
+    def test_cold_start_detected_when_no_snapshots(self):
+        """一个快照都没有 → 适用冷启动（产变更）。"""
+        ws = self._mk("cold", has_other_snapshot=False)
+        streams = os.path.join(ws, "state", "streams")
+        had = os.path.isdir(streams) and any(
+            f.endswith(".json") for f in os.listdir(streams))
+        self.assertFalse(had, "空 streams 目录应判定为冷启动")
+
+    def test_cold_start_filters_archived_old_items(self):
+        """冷启动必须把「早于窗口」的归档旧文剔掉，否则两年历史全进判定窗。
+
+        实测：DeepSeek 官方动态 19 条覆盖 2024-07 起两年，冷启动全判 added →
+        用户看到的正是"严重过时的旧闻当新动态"（这条抱怨换了个入口复发）。
+        口径：只滤**可解析时间**的条目，`published=None` 一律保留
+        （活动行/榜单/页面监测无时间戳且都是当前窗口内容）。
+        """
+        import pipeline
+        from unittest import mock
+        import datetime
+
+        ws = self._mk("e2e-cold-age", has_other_snapshot=False)
+        core.jdump(os.path.join(ws, "sources.json"), {
+            "version": 1, "settings": {"cold_start_max_age_days": 30},
+            "sources": [{"id": "arch", "name": "归档源", "kind": "rss",
+                         "url": "https://e/f", "enabled": True, "serves": ["intel"]}]})
+        core.jdump(os.path.join(ws, "rules.json"), core.jload(
+            os.path.join(core.SCRIPT_DIR, "..", "config", "rules.json.example"), None))
+
+        now = datetime.datetime.now()
+        fresh_iso = (now - datetime.timedelta(days=2)).isoformat()
+        old_iso = (now - datetime.timedelta(days=800)).isoformat()
+        entries = [
+            {"key": "https://e/new", "title": "近期新文", "link": "https://e/new",
+             "published": fresh_iso, "summary": "", "text": "t"},
+            {"key": "https://e/old", "title": "两年前归档", "link": "https://e/old",
+             "published": old_iso, "summary": "", "text": "t"},
+            {"key": "https://e/nots", "title": "无时间戳条目", "link": "https://e/nots",
+             "published": None, "summary": "", "text": "t"},
+        ]
+        with mock.patch.object(pipeline.collect, "run_collection",
+                               return_value=[(True, entries, None)]):
+            with mock.patch.object(pipeline, "acquire_lock",
+                                   return_value=open(os.devnull, "w")):
+                pipeline.run_round(ws)
+        latest = core.jload(os.path.join(ws, "out", "latest.json"), {})
+        titles = [c.get("title") for c in (latest.get("changes") or [])]
+        self.assertIn("近期新文", titles, "窗口内新文必须保留")
+        self.assertIn("无时间戳条目", titles, "无时间戳必须保留（否则活动行/榜单全丢）")
+        self.assertNotIn("两年前归档", titles, "归档旧文必须被窗口剔除")
+
+    def test_cold_start_snapshot_keeps_all_entries(self):
+        """冷启动过滤只影响「产变更」，快照必须存完整条目。
+
+        否则全被过滤时快照为空 → 次轮 `load_snapshot` 返回 {} → 又判"新源"
+        重走 baseline（2026-10-27 实测：qwen-blog 40 条全过滤 → 快照空 →
+        次轮报「无历史快照」）。这是"过滤快照"而非"过滤变更集"的经典踩坑。
+        """
+        import pipeline
+        from unittest import mock
+        import datetime
+
+        ws = self._mk("e2e-snap", has_other_snapshot=False)
+        core.jdump(os.path.join(ws, "sources.json"), {
+            "version": 1, "settings": {"cold_start_max_age_days": 30},
+            "sources": [{"id": "arch", "name": "全归档源", "kind": "rss",
+                         "url": "https://e/f", "enabled": True, "serves": ["intel"]}]})
+        core.jdump(os.path.join(ws, "rules.json"), core.jload(
+            os.path.join(core.SCRIPT_DIR, "..", "config", "rules.json.example"), None))
+
+        old_iso = (datetime.datetime.now() - datetime.timedelta(days=800)).isoformat()
+        entries = [{"key": "https://e/o%d" % i, "title": "旧文%d" % i,
+                    "link": "https://e/o%d" % i, "published": old_iso,
+                    "summary": "", "text": "t"} for i in range(5)]
+        with mock.patch.object(pipeline.collect, "run_collection",
+                               return_value=[(True, entries, None)]):
+            with mock.patch.object(pipeline, "acquire_lock",
+                                   return_value=open(os.devnull, "w")):
+                pipeline.run_round(ws)
+        latest = core.jload(os.path.join(ws, "out", "latest.json"), {})
+        self.assertEqual((latest.get("summary") or {}).get("total"), 0,
+                         "归档旧文不应产变更")
+        snap = diffcore.load_snapshot(ws, "arch")
+        self.assertEqual(len(snap), 5,
+                         "快照必须存完整 5 条（否则次轮误判为新源，实测过）")
+
+    def test_new_source_in_old_ws_not_cold_start(self):
+        """已有其他源快照 → 不是冷启动（本源仍走只建基线）。"""
+        ws = self._mk("warm", has_other_snapshot=True)
+        streams = os.path.join(ws, "state", "streams")
+        had = os.path.isdir(streams) and any(
+            f.endswith(".json") for f in os.listdir(streams))
+        self.assertTrue(had, "已有快照时不应判定为冷启动")
+
+    def test_cold_start_produces_changes(self):
+        """端到端：冷启动首扫必须产出变更（不能是 0）。"""
+        import pipeline
+        from unittest import mock
+
+        ws = self._mk("e2e-cold", has_other_snapshot=False)
+        # 最小配置
+        core.jdump(os.path.join(ws, "sources.json"), {
+            "version": 1, "settings": {},
+            "sources": [{"id": "s1", "name": "示例源", "kind": "rss",
+                         "url": "https://e/feed", "enabled": True,
+                         "serves": ["intel"]}]})
+        core.jdump(os.path.join(ws, "rules.json"), core.jload(
+            os.path.join(core.SCRIPT_DIR, "..", "config", "rules.json.example"), None))
+        entries = [{"key": "https://e/%d" % i, "title": "条目%d" % i,
+                    "link": "https://e/%d" % i, "published": None,
+                    "summary": "", "text": "t"} for i in range(3)]
+        with mock.patch.object(pipeline.collect, "run_collection",
+                               return_value=[(True, entries, None)]):
+            with mock.patch.object(pipeline, "acquire_lock",
+                                   return_value=open(os.devnull, "w")):
+                rc = pipeline.run_round(ws)
+        self.assertEqual(rc, 0)
+        latest = core.jload(os.path.join(ws, "out", "latest.json"), {})
+        total = (latest.get("summary") or {}).get("total")
+        self.assertEqual(total, 3, "冷启动首扫应把全部条目标为新增，实际 total=%s" % total)
+
+
+class TestInitCompleteness(unittest.TestCase):
+    """新环境初始化必须把「用户要维护的配置」全部落到工作区（2026-10-27 实测缺失）。
+
+    事故：`init_ws` 只复制 sources/entities/rules/notify 四份，**漏了 denylist.json**
+    —— v0.6.0 引入的黑名单文件。`load_denylist` 有内置模板回退所以功能不崩，
+    但文件不在工作区时用户看不到、改不了，增删名单静默不生效（设计意图是
+    「名单由用户改这个文件」）。空工作区 --run 还会静默用 config 模板跑通。
+    """
+
+    def test_init_copies_denylist(self):
+        """--init 必须把 denylist.json 复制到工作区。"""
+        import pipeline
+        ws = tempfile.mkdtemp(prefix="mi-init-")
+        rc = pipeline.init_ws(ws)
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.exists(os.path.join(ws, "denylist.json")),
+                        "init 未复制 denylist.json，用户无法维护黑名单")
+        d = core.jload(os.path.join(ws, "denylist.json"), {})
+        self.assertTrue(d.get("deny_entities"), "denylist 模板内容为空")
+        self.assertTrue(d.get("deny_by_round"), "denylist 缺轮次口径")
+
+    def test_init_copies_all_user_configs(self):
+        """四份核心配置 + 黑名单：一个不能少。"""
+        import pipeline
+        ws = tempfile.mkdtemp(prefix="mi-init2-")
+        pipeline.init_ws(ws)
+        for name in ("sources.json", "entities.json", "rules.json",
+                     "notify.json", "denylist.json"):
+            self.assertTrue(os.path.exists(os.path.join(ws, name)),
+                            "init 缺 %s" % name)
+
+
+class TestCleanCommand(unittest.TestCase):
+    """`--clean` 是洁净重置的单点定义（2026-10-27 新增）。
+
+    动机：SOP 第 2 步原要求 AI 手工敲 rm 删 6 类文件，历史上漏删过
+    `log/intel.jsonl`（增量差分失效）、也多删过配置。把「删什么/留什么」
+    写死在代码里，比每轮现编命令可靠。安全要求：**默认只演练，--yes 才删**。
+    """
+
+    def setUp(self):
+        import pipeline
+        self.pipeline = pipeline
+        self.ws = tempfile.mkdtemp(prefix="mi-clean-")
+        core.workspace(self.ws)
+        # 造出"脏"状态
+        for rel in ("state/streams/x.json", "state/digest_anchor.json",
+                    "state/pending.json", "out/a.json", "log/intel.jsonl",
+                    "log/discarded.jsonl", "log/rolled_out.jsonl", "log/runs.jsonl"):
+            p = os.path.join(self.ws, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            core.jdump(p, {"x": 1})
+        # 造出"必须保留"的配置与业务记忆
+        for rel in ("sources.json", "rules.json", "notify.json", "entities.json",
+                    "denylist.json", "log/leads.jsonl", "log/enrichments.jsonl",
+                    "state/hero_images.json"):
+            core.jdump(os.path.join(self.ws, rel), {"keep": 1})
+
+    def test_dry_run_deletes_nothing(self):
+        """不带 --yes 必须零删除（演练模式）。"""
+        before = sorted(os.path.relpath(p, self.ws) for p, _, _ in os.walk(self.ws))
+        self.pipeline.clean_ws(self.ws, yes=False)
+        after = sorted(os.path.relpath(p, self.ws) for p, _, _ in os.walk(self.ws))
+        self.assertEqual(before, after, "演练模式不应删除任何东西")
+        self.assertTrue(os.path.exists(os.path.join(self.ws, "log", "intel.jsonl")))
+
+    def test_yes_deletes_baseline_keeps_memory(self):
+        """--yes 删基线，但配置与业务记忆必须全保留。"""
+        self.pipeline.clean_ws(self.ws, yes=True)
+        gone = ["state/streams/x.json", "state/digest_anchor.json", "state/pending.json",
+                "out/a.json", "log/intel.jsonl", "log/discarded.jsonl",
+                "log/rolled_out.jsonl", "log/runs.jsonl"]
+        for rel in gone:
+            self.assertFalse(os.path.exists(os.path.join(self.ws, rel)),
+                             "%s 应被删除" % rel)
+        kept = ["sources.json", "rules.json", "notify.json", "entities.json",
+                "denylist.json", "log/leads.jsonl", "log/enrichments.jsonl",
+                "state/hero_images.json"]
+        for rel in kept:
+            self.assertTrue(os.path.exists(os.path.join(self.ws, rel)),
+                            "%s 必须保留（环境身份/业务记忆）" % rel)
+        # 目录要重建，否则下游首次运行报路径不存在
+        self.assertTrue(os.path.isdir(os.path.join(self.ws, "state", "streams")))
+        self.assertTrue(os.path.isdir(os.path.join(self.ws, "out")))
+
+    def test_new_runtime_file_auto_cleaned(self):
+        """保留清单驱动：未来新增的运行时文件也必须被清（防漏删）。
+
+        历史坑：早期用「列举要删的」清单，`state/health.json` 就没被列进去 →
+        静默保留旧 down 状态 → 清基线后仍报 down，误判源健康。
+        改成「列举要留的」后，任何新产物自动落到删除侧。
+        """
+        self.pipeline.clean_ws(self.ws, yes=True)
+        # 造三类"未来可能新增"的产物
+        for rel in ("state/health.json", "state/some_future_cache.json",
+                    "log/some_new_log.jsonl", "out/sub/dir/x.json"):
+            p = os.path.join(self.ws, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            core.jdump(p, {"x": 1})
+        self.pipeline.clean_ws(self.ws, yes=True)
+        for rel in ("state/health.json", "state/some_future_cache.json",
+                    "log/some_new_log.jsonl", "out/sub/dir/x.json"):
+            self.assertFalse(os.path.exists(os.path.join(self.ws, rel)),
+                             "%s 是运行时产物，应被自动清理" % rel)
+        # 保留项仍在
+        for rel in ("sources.json", "denylist.json", "log/leads.jsonl"):
+            self.assertTrue(os.path.exists(os.path.join(self.ws, rel)),
+                            "%s 必须保留" % rel)
+
+    def test_health_json_not_kept(self):
+        """state/health.json 必须清（旧 down 状态会污染新环境的健康判断）。"""
+        core.jdump(os.path.join(self.ws, "state", "health.json"),
+                   {"s1": {"fails": 3, "status": "down"}})
+        self.pipeline.clean_ws(self.ws, yes=True)
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "state", "health.json")),
+                         "源健康账簿属于运行时状态，新环境必须重置")
+
+
 class TestDryRun(unittest.TestCase):
     """--dry-run 沙箱预检：全流程演练，真实工作区零写入；问题在落盘前暴露。"""
 
@@ -1563,6 +2633,715 @@ class TestDryRun(unittest.TestCase):
             judge.cmd_input(ws, jp, dry_run=True)
         self.assertEqual(ctx.exception.code, 1)
         self.assertFalse(os.path.exists(os.path.join(ws, "log")))
+
+
+# ============================================================================
+# v0.6.5：全链路审计补测（2026-10-27 第三轮深度审查）
+# 每一条都对应一个**实测复现过的缺陷**，不是"看起来应该这样"。
+# ============================================================================
+
+class TestDenylistWordBoundary(unittest.TestCase):
+    """黑名单拉丁词条必须按词边界匹配（v0.6.5 修，最严重的一类误伤）。
+
+    实测：旧实现一律子串匹配，黑名单里的短英文名把大量**真正的腰部黑马**全拦掉：
+      `nio`（蔚来）→ Union AI / Senior Robotics / Companion Labs / Onion Games / Pinion AI
+      `meta`（Meta）→ Metaverse Works / MetaStudio / Metamorphic Games
+      `apple`（Apple）→ Pineapple Studio
+      `grab`/`goto`（Grab/GoTo）→ Grabber Tech / GoTopper
+      `branch`（Branch 归因）→ Branchline Media
+    14 个候选 100% 误伤。用户的核心诉求恰恰是"专盯腰部黑马"——**误伤比漏过滤更严重**：
+    漏过滤只是多一条噪音，误伤是目标客户永久消失且线索池无从发现。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        self.deny = match_mod.load_denylist(tempfile.mkdtemp(prefix="mi-wb-"))
+
+    def test_target_companies_not_falsely_blocked(self):
+        """短英文黑名单词不得误伤同名片段的成长型公司。"""
+        cases = ["Union AI", "Senior Robotics", "Companion Labs", "Onion Games",
+                 "Pinion AI", "Metaverse Works", "MetaStudio", "Metamorphic Games",
+                 "Pineapple Studio", "Grabber Tech", "GoTopper", "Branchline Media"]
+        bad = []
+        for name in cases:
+            hit, why = match_mod.check_denylist({"name": name, "aliases": []}, self.deny)
+            if hit:
+                bad.append("%s（%s）" % (name, why))
+        self.assertEqual(bad, [], "以下目标客群被黑名单误伤: %s" % "、".join(bad))
+
+    def test_real_giants_still_blocked(self):
+        """修边界不许把真巨头放过（含别名、带后缀、带空格的写法）。"""
+        cases = ["希音", "SHEIN", "字节跳动", "ByteDance", "腾讯", "米哈游",
+                 "Meta", "Meta Platforms", "Apple", "Apple Inc.", "Grab", "GoTo",
+                 "NIO", "蔚来", "Branch", "声网", "Agora", "钛动科技"]
+        miss = []
+        for name in cases:
+            hit, _ = match_mod.check_denylist({"name": name, "aliases": []}, self.deny)
+            if not hit:
+                miss.append(name)
+        self.assertEqual(miss, [], "以下真巨头/服务商漏拦: %s" % "、".join(miss))
+
+    def test_chinese_substring_still_works(self):
+        """中文仍走子串匹配：'希音集团' / '腾讯云' 这类组合名必须命中。"""
+        self.assertTrue(match_mod.check_denylist({"name": "希音集团", "aliases": []}, self.deny)[0])
+        self.assertTrue(match_mod.check_denylist({"name": "腾讯云科技", "aliases": []}, self.deny)[0])
+
+    def test_alias_path_uses_same_boundary(self):
+        """别名同样按词边界——别名 "Apple" 命中，别名 "Pineapple" 不命中。"""
+        self.assertTrue(match_mod.check_denylist(
+            {"name": "某科技", "aliases": ["Apple"]}, self.deny)[0])
+        self.assertFalse(match_mod.check_denylist(
+            {"name": "某科技", "aliases": ["Pineapple"]}, self.deny)[0])
+
+
+class TestRoundNormalization(unittest.TestCase):
+    """融资轮次归一化（v0.6.5 修）：空格与英文写法曾全部漏拦。
+
+    实测漏拦：`C 轮`（带空格）、`Series C`、`Series C+`、`series d`、`E 轮`
+    ——用户明令"已上市或 C 轮及以上绝对丢弃"，这些公司全被当成长型公司放行。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        self.deny = match_mod.load_denylist(tempfile.mkdtemp(prefix="mi-rnd-"))
+
+    def test_spaced_and_english_rounds_blocked(self):
+        """带空格 / 英文 Series 写法都要拦。"""
+        for rnd in ("C轮", "C 轮", "C+轮", "D轮", "E 轮", "Series C", "Series C+",
+                    "series d", "Pre-IPO轮", "战略融资", "IPO上市"):
+            hit, why = match_mod.check_denylist(
+                {"name": "某成长公司", "aliases": [], "funding_events": [{"round": rnd}]},
+                self.deny)
+            self.assertTrue(hit, "%r 应被轮次拦截（%s）" % (rnd, why))
+
+    def test_target_rounds_still_pass(self):
+        """修归一化不许误杀目标轮次。"""
+        for rnd in ("种子轮", "天使轮", "Pre-A轮", "A轮", "A+轮", "Pre-B轮", "B轮", "B+轮",
+                    "Series A", "Series B"):
+            hit, why = match_mod.check_denylist(
+                {"name": "某成长公司", "aliases": [], "funding_events": [{"round": rnd}]},
+                self.deny)
+            self.assertFalse(hit, "%r 属目标轮次，不该拦（%s）" % (rnd, why))
+
+
+class TestUnlistedCheckMerge(unittest.TestCase):
+    """`deny_unlisted_check` 必须随模板补齐，且用户显式 false 不得被覆盖（v0.6.5）。
+
+    实测缺陷：用户只覆盖实体名单（`{"version":1,"deny_entities":[...]}`）时该键恒为
+    None → 「已上市」检测整段失效，含"纳斯达克上市"的档案未被拦截。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        self.ws = tempfile.mkdtemp(prefix="mi-ul-")
+        core.workspace(self.ws)
+
+    def _write(self, content):
+        core.jdump(os.path.join(self.ws, "denylist.json"), content)
+
+    def test_missing_key_filled_from_builtin(self):
+        """只给实体名单 → unlisted 开关应被模板补齐为 True。"""
+        self._write({"version": 1, "deny_entities": ["只测这家"]})
+        d = match_mod.load_denylist(self.ws)
+        self.assertTrue(d.get("deny_unlisted_check"), "该开关必须随模板补齐，否则已上市检测失效")
+        hit, _ = match_mod.check_denylist(
+            {"name": "某公司", "profile": "该公司于 2025 年在纳斯达克上市"}, d)
+        self.assertTrue(hit, "补齐后已上市字样必须被拦")
+
+    def test_explicit_false_not_overridden(self):
+        """用户显式写 false = 主动关闭，模板不得覆盖回来（保留出口）。"""
+        self._write({"version": 1, "deny_entities": ["x"], "deny_unlisted_check": False})
+        d = match_mod.load_denylist(self.ws)
+        self.assertFalse(d.get("deny_unlisted_check"), "显式 false 必须被尊重")
+
+
+class TestIntelCardNoTruncation(unittest.TestCase):
+    """情报卡 / 线索卡 / digest 降级分支的 notify 截断（v0.6.5 修，陷阱 58）。
+
+    陷阱 47 声称"四段统一豁免"（活动/新闻/榜单/线索），实际只落地了三段。
+    本轮实测出另外三处硬截断，全部导致**判定成功但永久漏发**（锚点推进后
+    `logged_at` 早于新锚点，下期不再出现）。
+    """
+
+    def test_intel_blocks_exempts_notify(self):
+        """情报卡：9 条 notify=true，旧实现 limit=5 只渲染 5 条。"""
+        recs = [{"change_id": "c%d" % i, "type": "技术战报", "significance": "normal",
+                 "title": "情报标题%d" % i, "summary": "s", "notify": True,
+                 "sales_playbook": "针对跨境电商客户，用 Gemini 多模态生成商品图文替代第三方 API，"
+                                   "话术：数据驻留合规 + 全球骨干网低延迟。",
+                 "sources": [{"name": "s", "url": "http://x"}]} for i in range(9)]
+        blocks, total = judge.intel_blocks(recs)
+        blob = json.dumps(blocks, ensure_ascii=False)
+        missing = [i for i in range(9) if ("情报标题%d" % i) not in blob]
+        self.assertEqual(missing, [], "情报卡 notify=true 不许截断，漏了 %s" % missing)
+        self.assertEqual(total, 9)
+
+    def test_intel_blocks_archive_still_limited(self):
+        """情报卡：notify=false 归档仍按 limit 收敛，不无限膨胀。"""
+        recs = ([{"change_id": "n0", "title": "要通知", "notify": True, "significance": "normal"}]
+                + [{"change_id": "a%d" % i, "title": "归档%d" % i, "notify": False,
+                    "significance": "low"} for i in range(10)])
+        blob = json.dumps(judge.intel_blocks(recs)[0], ensure_ascii=False)
+        self.assertIn("要通知", blob)
+        self.assertLessEqual(sum(1 for i in range(10) if "归档%d" % i in blob), 5)
+
+    def test_lead_elements_exempts_notify(self):
+        """线索段：6 条 P0 线索，旧实现 limit=3 只展示 3 条。"""
+        leads = [{"lead_id": "l%d" % i, "entity_name": "客户%d" % i, "priority": "P0",
+                  "score": 95, "notify": True, "industries": ["短剧"],
+                  "matched_groups": ["g"],
+                  "logged_at": "2026-10-27T10:0%d:00+08:00" % i} for i in range(6)]
+        blob = json.dumps(judge._lead_elements(leads), ensure_ascii=False)
+        missing = [i for i in range(6) if ("客户%d" % i) not in blob]
+        self.assertEqual(missing, [], "P0 线索不许被 limit=3 截断，漏了 %s" % missing)
+
+    def test_lead_blocks_exempts_notify(self):
+        """线索卡：6 条 notify=true，旧实现 limit=5 只展示 5 条。"""
+        leads = [{"lead_id": "l%d" % i, "entity_name": "公司%d" % i, "priority": "P0",
+                  "score": 90, "notify": True, "matched_groups": ["g"]} for i in range(6)]
+        blob = json.dumps(judge.lead_blocks(leads), ensure_ascii=False)
+        missing = [i for i in range(6) if ("公司%d" % i) not in blob]
+        self.assertEqual(missing, [], "线索卡 notify=true 不许截断，漏了 %s" % missing)
+
+    def test_digest_fallback_exempts_notify(self):
+        """digest simple 降级分支：旧实现 `[:4]` 预截断，8 条只渲染 4 条。"""
+        ws = tempfile.mkdtemp(prefix="mi-dg-")
+        core.workspace(ws)
+        for i in range(8):
+            core.append_jsonl(os.path.join(ws, "log", "intel.jsonl"), {
+                "change_id": "d%d" % i, "type": "技术战报", "significance": "high",
+                "title": "降级标题%d" % i, "summary": "s", "url": "http://x",
+                "notify": True, "logged_at": core.now_iso(),
+                "sales_playbook": "针对跨境电商客户，用 Gemini 多模态生成商品图文替代第三方 API，"
+                                  "话术：数据驻留合规 + 全球骨干网低延迟。",
+                "sources": [{"name": "s", "url": "http://x"}]})
+        orig = judge.briefing_card
+        judge.briefing_card = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("模拟渲染失败"))
+        try:
+            judge.cmd_digest(ws, commit=False)
+        finally:
+            judge.briefing_card = orig
+        import glob
+        path = sorted(glob.glob(os.path.join(ws, "out", "card-digest-*.json")))[-1]
+        blob = json.dumps(json.load(open(path, encoding="utf-8")), ensure_ascii=False)
+        missing = [i for i in range(8) if ("降级标题%d" % i) not in blob]
+        self.assertEqual(missing, [], "降级分支同样不许截断 notify=true，漏了 %s" % missing)
+
+
+class TestActivityWithoutDetail(unittest.TestCase):
+    """type=活动情报 但缺 activity 明细，不得两头落空导致漏发（v0.6.5 修）。
+
+    实测：活动段要求 `x.get("activity")`、新闻段按 `type != "活动情报"` 排除 →
+    notify=true 的活动情报被两段同时抛弃，`briefing_card` 甚至返回 None（全空不产卡）。
+    """
+
+    def test_falls_back_to_news_section(self):
+        recs = [{"change_id": "a1", "type": "活动情报", "significance": "high",
+                 "notify": True, "title": "某出海大会", "summary": "11月举办",
+                 "url": "http://x", "sources": [{"name": "s", "url": "http://x"}]}]
+        card = judge.briefing_card(recs, [])
+        self.assertIsNotNone(card, "有 notify=true 内容时不得返回空卡")
+        self.assertIn("某出海大会", json.dumps(card, ensure_ascii=False),
+                      "缺 activity 明细的活动情报必须降级进新闻段，不能被丢弃")
+
+    def test_normal_activity_keeps_calendar_section(self):
+        """带 activity 明细的正常活动仍走活动日历段（修复不许改变正常路径）。"""
+        recs = [{"change_id": "a2", "type": "活动情报", "significance": "high",
+                 "notify": True, "title": "出海峰会", "summary": "x", "url": "http://x",
+                 "sources": [{"name": "s", "url": "http://x"}],
+                 "activity": {"name": "出海峰会", "time": "11月1日", "location": "北京",
+                              "highlight": "面向出海团队"}}]
+        blob = json.dumps(judge.briefing_card(recs, []), ensure_ascii=False)
+        self.assertIn("WebEye活动日历", blob)
+
+    def test_guard_rejects_notify_without_detail(self):
+        """判定落盘：缺 activity 明细但**无 title** 才拦（有 title 走降级渲染，不算漏发）。
+
+        口径说明：activity 明细是**排版增益**（让活动进日历段、带上时间地点），
+        不是内容本身。有 title/summary 的记录即使缺明细也能正常渲染进新闻段，
+        硬拦它等于把"排版不完美"升级成"判定失败"，属过度约束。真正会丢内容的是
+        **既缺 activity 又缺 title** 的裸记录——由既有骨架护栏拦截。
+        """
+        ws = tempfile.mkdtemp(prefix="mi-act-")
+        core.workspace(ws)
+        core.jdump(os.path.join(ws, "out", "latest.json"),
+                   {"run_at": core.now_iso(), "changes": [], "summary": {}})
+        jp = os.path.join(ws, "judged.json")
+        core.jdump(jp, {"intel": [{"change_id": "a1", "type": "活动情报",
+                                   "significance": "high", "title": "某活动",
+                                   "summary": "s", "url": "http://x", "sources": [],
+                                   "notify": True, "notify_reason": "r"}]})
+        # 有 title → 应正常落盘（降级渲染），不 exit
+        self.assertEqual(judge.cmd_input(ws, jp, dry_run=True), 0)
+
+
+class TestListOrdinalStrip(unittest.TestCase):
+    """列表页序号污染标题（v0.6.5 修，显示缺陷类）。
+
+    实测（品牌方舟列表页）：锚文本为「5. AI软硬件公司「Ambi」完成…」——「5.」是
+    **页面列表序号**，不是标题内容。不剥会导致卡片里出现「3. 5. xxx」双重编号
+    （新闻段自己也编号），读者以为漏了 1-4 条；且同一内容排到不同位时标题漂移。
+    """
+
+    def test_strips_leading_ordinal(self):
+        cases = [
+            ("5. AI软硬件公司「Ambi」完成1.74亿元Pre-A轮融资",
+             "AI软硬件公司「Ambi」完成1.74亿元Pre-A轮融资"),
+            ("4. 揽金6个亿，国产吸尘器在TikTok卖爆了！", "揽金6个亿，国产吸尘器在TikTok卖爆了！"),
+            ("6. Meta推出AI广告、视频制作、结账等新功能", "Meta推出AI广告、视频制作、结账等新功能"),
+            ("12、某产品完成A轮融资", "某产品完成A轮融资"),
+        ]
+        for src, want in cases:
+            self.assertEqual(collect._strip_list_ordinal(src), want, "应剥掉列表序号: %r" % src)
+
+    def test_does_not_touch_real_numeric_prefix(self):
+        """不许误伤以数字开头的真实标题（3D/5G/100天/年份）。"""
+        keep = ["3D 打印迎来新突破", "5G 芯片出货量翻倍", "100 天环游世界",
+                "2026 卫星应用大会", "AI 文娱（短剧）产业生态大会"]
+        for t in keep:
+            self.assertEqual(collect._strip_list_ordinal(t), t, "不该动: %r" % t)
+
+    def test_page_links_applies_strip(self):
+        """links 模式端到端生效。"""
+        body = '<a href="https://e.com/a">5. 某公司完成 Pre-A 轮融资</a>'
+        entries = collect.parse_web_page(body, {"url": "https://e.com/",
+                                                "config": {"mode": "links"}})
+        self.assertEqual(entries[0]["title"], "某公司完成 Pre-A 轮融资")
+
+
+class TestCardSizeGuard(unittest.TestCase):
+    """卡片体积护栏（v0.6.6，飞书硬上限，本技能自己的回归）。
+
+    事故链：v0.6.5 把 notify=true 改成「全部展示」防漏发（方向正确），
+    但**没同时处理体积** → 真实内参卡膨胀到 39599 字节 / 178 元素，
+    **双双超过飞书硬上限**（30KB / 200 元素）→ 发送必报 230025 / 300305 失败。
+    更糟的是失败发生在 `--digest --commit` 之后（先产卡后推锚），内容已标已通报 → 永久丢失。
+
+    官方限制来源（2026-10-27 核实）：
+      - 30KB：open.feishu.cn/document/server-docs/im-v1/faq（"JSON 长度不超过 30KB"）
+      - 200 元素：open.feishu.cn/document/cardkit-v1/card-element/create（错误码 300305）
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        self.ws = tempfile.mkdtemp(prefix="mi-card-size-")
+        core.workspace(self.ws)
+
+    def _recs(self, n):
+        return [{"change_id": "c%d" % i, "type": "技术战报", "significance": "high",
+                 "title": "情报标题%d：某模型降价" % i,
+                 "summary": "这是第 %d 条摘要，包含足够多文字模拟真实判定内容。" % i,
+                 "notify": True,
+                 "sales_playbook": "客户拿低价压我们时不要跟价，把话题拉回合规与稳定性成本。"
+                                   "话术：模型单价只是账单的一部分，数据驻留合规、全球骨干网"
+                                   "低延迟、Vertex AI 统一托管带来的运维人力节省才是真实 TCO。",
+                 "sources": [{"name": "测试源", "url": "http://x"}]} for i in range(n)]
+
+    def test_limits_are_the_official_values(self):
+        """常量必须与飞书官方一致（30KB / 200 元素），并留出余量。"""
+        self.assertLessEqual(judge.CARD_MAX_BYTES, 30 * 1024)
+        self.assertGreater(judge.CARD_MAX_BYTES, 28000, "余量过大等于白白浪费可用空间")
+        self.assertLessEqual(judge.CARD_MAX_ELEMENTS, 200)
+
+    def test_oversized_card_is_split(self):
+        """超限卡必须被切成多张，且每张都在限制内（内容不许丢）。"""
+        n = 45  # 实测 30 条约 27.6KB 未超限，45 条必超
+        blocks, _ = judge.intel_blocks(self._recs(n))
+        card = judge.build_card("测试简报", "t", blocks, template="violet")
+        self.assertGreater(judge.card_bytes(card), judge.CARD_MAX_BYTES,
+                           "前提：这张卡本身是超限的")
+        paths = judge.write_card(self.ws, "card-test.json", card)
+        self.assertIsInstance(paths, list, "超限应返回分片列表")
+        self.assertGreater(len(paths), 1)
+        for p in paths:
+            c = json.load(open(p, encoding="utf-8"))
+            self.assertLessEqual(judge.card_bytes(c), judge.CARD_MAX_BYTES,
+                                 "%s 仍超 30KB" % p)
+            self.assertLessEqual(judge.card_element_count(c), judge.CARD_MAX_ELEMENTS)
+        # 内容完整性：全部标题一条都不许丢
+        blob = "".join(json.dumps(json.load(open(p, encoding="utf-8")), ensure_ascii=False)
+                       for p in paths)
+        missing = [i for i in range(n) if ("情报标题%d：" % i) not in blob]
+        self.assertEqual(missing, [], "分片后丢了内容: %s" % missing)
+
+    def test_split_marks_part_index(self):
+        """分片标题要带 (1/N) 标记，读者才知道内容有后续。"""
+        blocks, _ = judge.intel_blocks(self._recs(45))
+        card = judge.build_card("测试简报", "t", blocks, template="violet")
+        paths = judge.write_card(self.ws, "card-test.json", card)
+        paths = paths if isinstance(paths, list) else [paths]
+        if len(paths) > 1:
+            n = len(paths)
+            for i, p in enumerate(paths, 1):
+                title = json.load(open(p, encoding="utf-8"))["header"]["title"]["content"]
+                self.assertIn("（%d/%d）" % (i, n), title)
+
+    def test_normal_card_returns_str(self):
+        """未超限时保持历史语义：返回单个 path 字符串（调用方不必改）。"""
+        blocks, _ = judge.intel_blocks(self._recs(2))
+        card = judge.build_card("小卡", "t", blocks, template="violet")
+        r = judge.write_card(self.ws, "card-small.json", card)
+        self.assertIsInstance(r, str)
+
+    def test_giant_single_element_warns_not_drops(self):
+        """单个元素本身超限：不可切割时必须告警保留，不得静默丢弃。"""
+        card = judge.build_card("巨大块", "t",
+                                [{"tag": "markdown", "content": "X" * 50000}], template="violet")
+        paths = judge.write_card(self.ws, "card-huge.json", card)
+        paths = paths if isinstance(paths, list) else [paths]
+        blob = "".join(json.dumps(json.load(open(p, encoding="utf-8")), ensure_ascii=False)
+                       for p in paths)
+        self.assertEqual(blob.count("X"), 50000, "超限内容不许被丢掉")
+
+    def test_element_count_counts_nested(self):
+        """元素统计必须含 interactive_container 内嵌子元素（否则 200 限制形同虚设）。"""
+        blocks, _ = judge.intel_blocks(self._recs(3))
+        card = judge.build_card("x", "t", blocks, template="violet")
+        # 每个 _block 是 1 个容器 + 内部若干 markdown
+        self.assertGreater(judge.card_element_count(card), len(blocks))
+
+
+class TestDigestPendingSend(unittest.TestCase):
+    """待发送清单（v0.6.6）：给「发送 → 核对 → 推锚」留可核对凭据。
+
+    `--digest --commit` 的缺陷：先产卡、再推锚，两步之间没有「发送成功」的确认点。
+    一旦发送失败（如卡片超限被拒收），内容已标 suppressed_by_guard → 永久丢失且无从追溯。
+    待发送清单把「这一批包含哪些卡、覆盖哪些记录」落盘，失败时可据此精确补发。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        self.ws = tempfile.mkdtemp(prefix="mi-batch-")
+        core.workspace(self.ws)
+        core.append_jsonl(os.path.join(self.ws, "log", "intel.jsonl"), {
+            "change_id": "k1", "type": "技术战报", "significance": "high",
+            "title": "测试情报", "summary": "s", "url": "http://x", "notify": True,
+            "sales_playbook": "客户拿低价压价时把话题拉回合规与稳定性成本，"
+                              "话术：模型单价只是账单一部分，数据驻留合规与骨干网低延迟才是 TCO。",
+            "logged_at": core.now_iso(), "sources": [{"name": "s", "url": "http://x"}]})
+
+    def test_non_commit_writes_batch_manifest(self):
+        """不带 --commit：产卡 + 落待发送清单，锚点不动。"""
+        judge.cmd_digest(self.ws, commit=False)
+        batch = os.path.join(self.ws, "state", "digest_pending_send.json")
+        self.assertTrue(os.path.exists(batch), "必须落待发送清单，供发送后核对")
+        rec = json.load(open(batch, encoding="utf-8"))
+        self.assertGreaterEqual(rec["card_count"], 1)
+        self.assertIn("k1", rec["record_ids"])
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "state", "digest_anchor.json")),
+                         "未 commit 不许推进锚点")
+
+    def test_commit_advances_and_clears_manifest(self):
+        """带 --commit：推锚 + 清凭据（这一批已完成闭环）。"""
+        judge.cmd_digest(self.ws, commit=True)
+        self.assertTrue(os.path.exists(os.path.join(self.ws, "state", "digest_anchor.json")))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.ws, "state", "digest_pending_send.json")),
+            "已推锚应清掉凭据，避免陈旧清单误导补发")
+
+    def test_card_files_match_manifest(self):
+        """清单里的卡片路径必须真实存在（否则补发时找不到文件）。"""
+        judge.cmd_digest(self.ws, commit=False)
+        rec = json.load(open(os.path.join(self.ws, "state", "digest_pending_send.json"),
+                             encoding="utf-8"))
+        for p in rec["cards"]:
+            self.assertTrue(os.path.exists(p), "清单引用了不存在的卡片: %s" % p)
+
+
+class TestQuerySinceFilter(unittest.TestCase):
+    """`query.py --since` 必须按时间戳比较，不能按字符串（v0.6.6 修）。
+
+    旧实现 `(logged_at or "") >= since` 是字典序比较，跨时区直接算错：
+    `2026-10-27T06:00:00Z` 与 `2026-10-27T14:00:00+08:00` 是**同一时刻**，
+    但字符串 "06..." < "14..." → UTC 写法的记录被误判为"更早"，静默漏掉。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        import query
+        self.q = query
+
+    def test_cross_timezone_equivalent(self):
+        """UTC 写法与 +08:00 写法的同一时刻，必须同进同出。"""
+        recs = [{"logged_at": "2026-10-27T06:00:00Z", "x": 1},
+                {"logged_at": "2026-10-27T14:00:00+08:00", "x": 2},
+                {"logged_at": "2026-10-26T10:00:00+08:00", "x": 3}]
+        out = self.q._since_filter(recs, "2026-10-27T13:00:00+08:00")
+        self.assertEqual([r["x"] for r in out], [1, 2],
+                         "06:00Z 等于 14:00+08:00，两者都该命中；26 日那条不该命中")
+
+    def test_date_only_since(self):
+        """只给日期时，当天所有记录都该命中。"""
+        recs = [{"logged_at": "2026-10-27T01:00:00+08:00", "x": 1},
+                {"logged_at": "2026-10-26T23:00:00+08:00", "x": 2}]
+        out = self.q._since_filter(recs, "2026-10-27")
+        self.assertEqual([r["x"] for r in out], [1])
+
+    def test_unparseable_since_degrades_with_warning(self):
+        """无法解析时退化比较，不能抛异常也不能静默全丢。"""
+        recs = [{"logged_at": "2026-10-27T10:00:00+08:00", "x": 1}]
+        out = self.q._since_filter(recs, "不是时间")
+        self.assertIsInstance(out, list)
+
+
+class TestDuplicateDetection(unittest.TestCase):
+    """同一事件多源报道的兜底检测（v0.6.7，用户实测反馈驱动）。
+
+    用户原话：「很多信息实际是重复的，虽然标题和文案有些不一样，但实际表达内容是一致的，
+    AI 协助和兜底就能很好的处理，为什么还会重？」
+
+    事实核对：`intel-criteria.md` 早写了「同一事件多家报道：合并成一条，merged_change_ids
+    列出被合并的 change_id，只通知一次」——**契约有、执行没做**。所以补的是"兜底"。
+
+    设计底线：**只提示、不删改、不阻断**。
+      - 「两篇是否同一事件」是语义问题，机械合并一定错改；
+      - 自动删会造成静默漏发，比重复更严重（用户首要诉求是"不漏"）。
+
+    判据经四次迭代，每次都是被实测打回：
+      ① 整串特征重合 → 早报把多事件塞一条标题，特征稀释，漏判（0.36）
+      ② 锚点含型号词 → Kimi 泄露 / DeepSeek 斩杀 GPT-6 共有 gpt-6，误报
+      ③ 只比主体实体 → Kimi 发布 vs Kimi 泄露 主体都是 kimi，误报；Meta 被罚 vs Meta 合作同
+      ④ **主体 + 事件类型双维度** ← 现在的方案，正反例全过
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+
+    def _pairs(self, recs):
+        return {frozenset((a["change_id"], b["change_id"]))
+                for a, b, _ in judge.find_duplicate_intel(recs)}
+
+    def test_same_event_detected(self):
+        """同一事件多源报道必须检出。"""
+        recs = [
+            {"change_id": "a", "title": "Kimi 发布 K3.1 Pro，加量降价挑战 Opus 5.5"},
+            {"change_id": "b", "title": "iPhone Duo正式交付；Kimi K3.1 Pro 、Seedance 2.5 4K正式发布｜极客早知道"},
+            {"change_id": "d", "title": "DeepSeek 新模型上线，价格更低能力更强｜极客早知道"},
+            {"change_id": "f", "title": "梁圣又掀桌了！DeepSeek新模型斩杀GPT-6，许愿式编程时代降临"},
+        ]
+        p = self._pairs(recs)
+        self.assertIn(frozenset(("a", "b")), p, "Kimi K3.1 Pro 发布被早报重复报道，应检出")
+        self.assertIn(frozenset(("d", "f")), p, "DeepSeek 新模型被两家报道，应检出")
+
+    def test_same_entity_different_event_not_flagged(self):
+        """同一主体的不同事件**不许**判重（这是判据能用的前提）。"""
+        recs = [
+            {"change_id": "a", "title": "Kimi 发布 K3.1 Pro，加量降价挑战 Opus 5.5"},
+            {"change_id": "c", "title": "Kimi K3.1 泄露：3D 成本仅有 GPT-6 Astra 的 1/14"},
+            {"change_id": "k", "title": "Meta 泄露用户隐私被罚 250 亿美元"},
+            {"change_id": "l", "title": "英伟达与 Meta 宣布扩大 Muse 系列模型合作"},
+        ]
+        p = self._pairs(recs)
+        self.assertNotIn(frozenset(("a", "c")), p, "Kimi 发布 ≠ Kimi 泄露，不许判重")
+        self.assertNotIn(frozenset(("k", "l")), p, "Meta 被罚 ≠ Meta 合作，不许判重")
+
+    def test_different_entity_never_flagged(self):
+        """主体不同的事件不许判重（即使都属于"欧洲跨境"话题）。"""
+        recs = [
+            {"change_id": "h", "title": "欧洲百强在线市场GMV约1750亿欧元 近八成来自跨境"},
+            {"change_id": "i", "title": "希音欧洲物流枢纽启动大规模招聘"},
+            {"change_id": "j", "title": "速卖通欧洲官方配送降价 合作仓最高返30%物流费"},
+        ]
+        self.assertEqual(self._pairs(recs), set(), "主体不同，一个都不该报")
+
+    def test_only_warns_never_deletes(self):
+        """兜底只在 stderr 提示，绝不修改记录内容。"""
+        recs = [{"change_id": "a", "title": "DeepSeek 新模型上线"},
+                {"change_id": "b", "title": "DeepSeek新模型发布，能力更强"}]
+        before = json.dumps(recs, ensure_ascii=False, sort_keys=True)
+        n = judge.warn_duplicates(recs)
+        after = json.dumps(recs, ensure_ascii=False, sort_keys=True)
+        self.assertGreaterEqual(n, 1, "应报出候选")
+        self.assertEqual(before, after, "绝不允许修改记录（只提示）")
+
+
+class TestAutoMergeDuplicates(unittest.TestCase):
+    """同一事件多源报道的**自动合并**（v0.6.7，用户实测反馈驱动）。
+
+    用户原话：「很多信息实际是重复的…AI 协助和兜底就能很好的处理，为什么还会重？」
+    → 只提示不够（提示了没人改，卡片照样重复），兜底必须真的合并。
+
+    合并语义严格复用既有 `merged_change_ids` 契约，不新造字段：
+      - 从条 change_id 进主条 merged_change_ids（覆盖度校验据此认可，不报缺口）
+      - 从条 sources 并入主条（去重）
+      - 从条标题留在 merged_titles（可溯源"哪几篇被合并了"）
+    安全阀：只合并 notify=true 的非 discard 条目；判据仍是「主体+事件类型」双维度。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+
+    def _rec(self, cid, title, sig="high", notify=True):
+        return {"change_id": cid, "title": title, "significance": sig,
+                "notify": notify, "url": "https://e/%s" % cid,
+                "sources": [{"name": "源" + cid, "url": "https://e/%s" % cid}]}
+
+    def test_merges_same_event(self):
+        """同一事件 3 条 → 合成 1 条，来源合并、原标题留档。"""
+        intel = [self._rec("c1", "DeepSeek 新模型上线，价格更低能力更强｜极客早知道"),
+                 self._rec("c2", "DeepSeek V4.1 Flash 新版本：许愿式编程一键成真"),
+                 self._rec("c3", "梁圣又掀桌了！DeepSeek新模型斩杀GPT-6", sig="normal")]
+        out, n = judge.auto_merge_duplicates(intel)
+        self.assertEqual(len(out), 1, "3 条同一事件应合成 1 条")
+        self.assertEqual(n, 2)
+        main = out[0]
+        self.assertEqual(sorted(main["merged_change_ids"]), ["c2", "c3"])
+        self.assertEqual(len(main["sources"]), 3, "三家来源都该并入")
+        self.assertEqual(len(main["merged_titles"]), 2, "被合并的标题要留档")
+
+    def test_does_not_merge_different_events(self):
+        """同一主体的两件不同事不许合并（Kimi 发布 vs Kimi 泄露）。"""
+        intel = [self._rec("a", "Kimi 发布 K3.1 Pro，加量降价挑战 Opus 5.5"),
+                 self._rec("b", "Kimi K3.1 泄露：3D 成本仅有 GPT-6 的 1/14")]
+        out, n = judge.auto_merge_duplicates(intel)
+        self.assertEqual(len(out), 2, "两件不同的事不许合并")
+        self.assertEqual(n, 0)
+
+    def test_ignores_non_notify(self):
+        """归档条目（notify=false）不参与合并——它们不上卡，合并无收益。"""
+        intel = [self._rec("a", "DeepSeek 新模型上线", notify=True),
+                 self._rec("b", "DeepSeek 新模型发布，能力更强", notify=False)]
+        out, n = judge.auto_merge_duplicates(intel)
+        self.assertEqual(n, 0, "notify=false 不参与自动合并")
+
+    def test_can_be_disabled(self):
+        """enable=False 时退化为不合（留出口）。"""
+        intel = [self._rec("a", "DeepSeek 新模型上线"),
+                 self._rec("b", "DeepSeek 新模型发布")]
+        out, n = judge.auto_merge_duplicates(intel, enable=False)
+        self.assertEqual((len(out), n), (2, 0))
+
+    def test_merged_ids_satisfy_coverage(self):
+        """合并后覆盖度校验不能报缺口（merged_change_ids 已被认可）。"""
+        intel = [self._rec("c1", "DeepSeek 新模型上线，价格更低"),
+                 self._rec("c2", "DeepSeek V4.1 Flash 新版本")]
+        out, _ = judge.auto_merge_duplicates(intel)
+        latest = {"changes": [{"change_id": "c1"}, {"change_id": "c2"}]}
+        missing = judge.coverage_check(latest, out, [])
+        self.assertEqual(missing, [], "被合并的 c2 应通过 merged_change_ids 被认可")
+
+
+class TestRankNoButton(unittest.TestCase):
+    """榜单段不渲染「查看榜单原文」按钮（v0.6.8，2026-10-27 用户明令）。
+
+    用户只点了这一处：「榜单监控的 查看榜单原文 按钮可以去掉」。
+
+    为什么删了也安全：榜单记录的 `url` 与 `sources[0].url` 实测 4/4 完全一致，
+    而 `_sources_line()` 本身就把媒体名渲染成可点链接 —— 跳转能力一点没丢，
+    去掉的只是与正上方来源链接指向同一地址的重复按钮。
+
+    这个测试同时是**防连带改动**的护栏：用户明令不许随意篡改模板，
+    所以这里既验证"该删的删了"，也验证"其余段落一个都没动"。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+
+    def _rank_rec(self):
+        return {"change_id": "r1", "type": "榜单新晋", "title": "BEEMO AI",
+                "summary": "榜单新面孔，需核实主体", "notify": False,
+                "url": "https://aicpb.com/p1",
+                "sources": [{"name": "AI产品榜", "url": "https://aicpb.com/p1"}]}
+
+    def test_no_button_in_rank_section(self):
+        """榜单段：不产按钮。"""
+        els = judge._rank_elements([self._rank_rec()])
+        btns = [e for e in els if e.get("tag") == "button"]
+        self.assertEqual(btns, [], "榜单段不该再出现按钮")
+
+    def test_rank_source_link_preserved(self):
+        """删按钮后跳转能力不能丢：来源链接必须仍在。"""
+        els = judge._rank_elements([self._rank_rec()])
+        blob = json.dumps(els, ensure_ascii=False)
+        self.assertIn("https://aicpb.com/p1", blob, "来源行必须仍带原链接")
+
+    def test_rank_content_complete(self):
+        """标题/摘要/来源三段齐全，不能因为删按钮把内容也删了。"""
+        els = judge._rank_elements([self._rank_rec()])
+        self.assertEqual(len(els), 3, "应是 标题 + 摘要 + 来源 三块")
+        blob = json.dumps(els, ensure_ascii=False)
+        self.assertIn("BEEMO AI", blob)
+        self.assertIn("榜单新面孔", blob)
+
+    def test_other_sections_buttons_untouched(self):
+        """**防连带改动**：新闻/线索段的按钮必须原样保留。"""
+        news = [{"type": "技术战报", "title": "T", "summary": "S", "url": "https://n/1",
+                 "notify": True, "significance": "high",
+                 "sources": [{"name": "源", "url": "https://n/1"}]}]
+        nbtn = [e for e in judge._news_elements(news) if e.get("tag") == "button"]
+        self.assertTrue(nbtn, "新闻段「让我看看👀」按钮不许被连带删掉")
+        self.assertIn("让我看看", nbtn[0]["text"]["content"])
+
+        leads = [{"lead_id": "l1", "entity_name": "某公司", "priority": "P0", "score": 90,
+                  "notify": True, "matched_groups": ["g"],
+                  "logged_at": "2026-10-27T10:00:00+08:00"}]
+        lbtn = [e for e in judge._lead_elements(leads, view_url="https://pool/1")
+                if e.get("tag") == "button"]
+        self.assertTrue(lbtn, "线索段按钮不许被连带删掉")
+
+
+class TestNoBoilerplateSummary(unittest.TestCase):
+    """摘要不许是套话（v0.6.9，用户实地反馈）。
+
+    用户原话：「榜单监控的每个内容都很短，都是『xxxx。需人工核实公司主体与融资轮次后
+    决定是否建联。』，而且信息 AI 不都会调研补全的吗？」
+
+    事实：AI产品榜详情页是服务端渲染、公开可读，实测 4/4 都能取到
+    榜单项/指标/月环比/名次。所以写套话不是数据不可得，是判定偷懒。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+
+    def test_boilerplate_detected(self):
+        """典型的「需人工核实…」套话必须被检出。"""
+        recs = [{"change_id": "x1", "notify": True, "title": "BEEMO AI",
+                 "summary": "BEEMO AI 出现在 AI 产品榜，属榜单新面孔。"
+                            "需人工核实公司主体与融资轮次后决定是否建联。"}]
+        self.assertGreaterEqual(judge.warn_boilerplate(recs), 1)
+
+    def test_real_data_summary_passes(self):
+        """带真实数据的摘要不能误报。"""
+        recs = [{"change_id": "x2", "notify": True, "title": "vivago.ai",
+                 "summary": "vivago.ai 在 AI产品榜·出海增速榜(App) 以 4.60M App 月活跃用户 "
+                            "位列第 1 名，月环比 +17.10%。出海增速榜第 1 名意味着海外用户"
+                            "正在快速起量，直接命中目标客群画像。"}]
+        self.assertEqual(judge.warn_boilerplate(recs), 0, "真实数据摘要不该被判套话")
+
+    def test_short_summary_flagged(self):
+        """过短（<25 字）也算信息量不足。"""
+        recs = [{"change_id": "x3", "notify": True, "title": "T", "summary": "太短了"}]
+        self.assertGreaterEqual(judge.warn_boilerplate(recs), 1)
+
+    def test_archive_entries_ignored(self):
+        """notify=false 的归档条目不检查（它们本就不上卡）。"""
+        recs = [{"change_id": "x4", "notify": False, "title": "T", "summary": "短"}]
+        self.assertEqual(judge.warn_boilerplate(recs), 0)
+
+
+class TestSourceNameNoSuffix(unittest.TestCase):
+    """源名称不许带「（页面监测）」这类实现细节后缀（v0.6.9，用户实地反馈）。
+
+    这个后缀原本用于区分「RSS 订阅」和「网页监测」两种采集方式，属**实现细节**；
+    但它会跟着来源行渲染到卡片上，读者看到「来源 · AI产品榜（页面监测）」毫无价值。
+    区分采集方式用源的 `kind` 字段即可，不该出现在展示名里。
+    """
+
+    def test_no_monitoring_suffix_in_config(self):
+        import json as _json
+        p = os.path.join(core.SCRIPT_DIR, "..", "config", "sources.json.example")
+        d = _json.load(open(p, encoding="utf-8"))
+        bad = [s["name"] for s in d.get("sources", []) if "页面监测" in s.get("name", "")]
+        self.assertEqual(bad, [], "源名称不该带『（页面监测）』后缀: %s" % bad)
+
+    def test_source_ids_unchanged(self):
+        """只改展示名，id 必须保持不变（id 是键，改了会断基线）。"""
+        import json as _json
+        p = os.path.join(core.SCRIPT_DIR, "..", "config", "sources.json.example")
+        d = _json.load(open(p, encoding="utf-8"))
+        ids = {s["id"] for s in d.get("sources", [])}
+        for must in ("aicpb-rank-page", "zhidx-page", "brandark-page", "pedaily-invest-page"):
+            self.assertIn(must, ids, "源 id 不许改动（它是基线键）: %s" % must)
 
 
 def _mk_out(ws):
