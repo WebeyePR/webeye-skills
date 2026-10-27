@@ -98,3 +98,14 @@
 - 一条变更既值得看又含企业事实 → `intel` 和 `facts` 各一条，共享 `change_ids`；
 - 一条变更只是线索原料（如融资快讯）不值得单独通知 → 只写 `facts`，不写 `intel`；
 - 两者都没有 → `intel` 里写 `discard`。**三选一必须发生，不许留空。**
+
+
+## v0.6.12：范围与事件日期的严格口径
+
+- 档案明确非 CN 时，城市／人民币关键词不能覆盖；明确 going_global=false 时不进入出海潜客。
+- 融资事件 date 必须为可解析的发生日期；不允许 extracted_at 替代，未来日期不算近期。
+- product_launch／business_surge 等事件请在 event.date 填发生日期（ISO 日期或时间）；
+  无法证实时仍可保存事实，但不命中有 within_days 的近期信号组，不自动降为 P1。
+- rank_new_entry 表示首次观察到榜单新晋，可以使用 extracted_at；招聘 last_seen 是观察时间，
+  保留既有语义，无法解析或在未来的观察时间不算有效近期证据。
+- 既有事实不自动改写或补日期；不能从采集日期猜事件发生日期。

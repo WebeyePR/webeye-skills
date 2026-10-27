@@ -320,12 +320,12 @@ def ev_funding(cond, fact):
     rounds = cond.get("round_any") or []
     now = core.time.time()
     for fe in fact.get("funding_events") or []:
-        raw_date = fe.get("date") or fe.get("extracted_at")
+        raw_date = fe.get("date")
         ts = core.parse_iso(raw_date)
         if within:
             if ts is None:
                 continue  # 时效要求下，时间不可解析 = 无法确认"近期"，不命中
-            if (now - ts) / 86400.0 > within:
+            if not 0 <= (now - ts) / 86400.0 <= within:
                 continue
         if rounds and (fe.get("round") or "") not in rounds:
             continue
@@ -352,7 +352,7 @@ def ev_hiring(cond, fact):
     for hs in fact.get("hiring_signals") or []:
         if within:
             ts = core.parse_iso(hs.get("last_seen") or hs.get("first_seen"))
-            if ts and (now - ts) / 86400.0 > within:
+            if ts is None or not 0 <= (now - ts) / 86400.0 <= within:
                 continue
         hit = [k for k in (hs.get("keywords") or [])
                if k.lower() in kws_any or any(a in k.lower() for a in kws_any)]
@@ -378,8 +378,12 @@ def ev_other_event(cond, fact):
         if kinds and kind not in kinds:
             continue
         if within:
-            ts = core.parse_iso(oe.get("extracted_at"))
-            if ts and (now - ts) / 86400.0 > within:
+            # 榜单新晋按首次观察；发布／增长按事件日期，禁止用今天抽取替代。
+            date = oe.get("date")
+            if kind == "rank_new_entry":
+                date = date or oe.get("extracted_at")
+            ts = core.parse_iso(date)
+            if ts is None or not 0 <= (now - ts) / 86400.0 <= within:
                 continue
         detail = oe.get("detail") or ""
         if kws_any and not any(k in detail.lower() for k in kws_any):
@@ -397,8 +401,11 @@ def ev_chinese(cond, fact):
     """中国企业判定：优先档案显式 origin=CN（AI 判断申报 / 词表实体标注），
     兜底启发式——融资币种为人民币、公司主体词（有限公司/科技/网络）或中国城市词。
     启发式命中置信低于显式申报，仅用于 unknown 档案兜底，不虚报。"""
-    if (fact.get("origin") or "").upper() == "CN":
+    origin = str(fact.get("origin") or "").strip().upper()
+    if origin == "CN":
         return True, "中国企业（判断申报/词表标注）"
+    if origin not in ("", "UNKNOWN", "未知"):
+        return False, None  # 明确的非中国企业不接受关键词覆盖。
     for fe in fact.get("funding_events") or []:
         txt = (fe.get("amount_text") or "") + (fe.get("investors") or "")
         if "人民币" in txt or "亿元" in txt or "万元" in txt:
@@ -420,7 +427,10 @@ def ev_going_global(cond, fact):
     """业务出海判定：档案显式 going_global（AI 申报/词表标注），或任一事件/招聘/行业
     文本里出现出海关键词（出海/跨境/全球化/海外等）。短剧等行业天然出海，行业词表
     里以"短剧出海"标注。"""
-    if fact.get("going_global"):
+    explicit = fact.get("going_global")
+    if explicit is False or str(explicit).lower() == "false":
+        return False, None  # 缺少标注与明确否定必须区分。
+    if explicit is True or str(explicit).lower() == "true":
         return True, "业务出海（判断申报/词表标注）"
     if any("出海" in i for i in fact.get("industries") or []):
         return True, "业务出海（行业 %s）" % next(i for i in fact["industries"] if "出海" in i)

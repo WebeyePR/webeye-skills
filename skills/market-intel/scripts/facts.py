@@ -168,10 +168,13 @@ def apply_fact(ws, fact, entities, now):
                                  (e.get("kind") or "") + "|" + (e.get("detail") or "")[:120]) == dedupe), None)
         if hit:
             hit.setdefault("_dedupe", dedupe)
+            if event.get("date") and not hit.get("date"):
+                hit["date"] = event["date"]
         else:
             rec["other_events"].append({
                 "_dedupe": dedupe,
                 "kind": event.get("kind", "other"),
+                "date": event.get("date"),
                 "detail": event.get("detail", ""),
                 "source_url": event.get("source_url"),
                 "confidence": fact.get("confidence", "low"),

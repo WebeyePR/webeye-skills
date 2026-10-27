@@ -3176,18 +3176,27 @@ class TestAutoMergeDuplicates(unittest.TestCase):
                 "notify": notify, "url": "https://e/%s" % cid,
                 "sources": [{"name": "源" + cid, "url": "https://e/%s" % cid}]}
 
-    def test_merges_same_event(self):
-        """同一事件 3 条 → 合成 1 条，来源合并、原标题留档。"""
+    def test_title_variants_require_semantic_judgment(self):
+        """标题变体只有候选证据；缺少正文时不得自动断言同一事件。"""
         intel = [self._rec("c1", "DeepSeek 新模型上线，价格更低能力更强｜极客早知道"),
                  self._rec("c2", "DeepSeek V4.1 Flash 新版本：许愿式编程一键成真"),
                  self._rec("c3", "梁圣又掀桌了！DeepSeek新模型斩杀GPT-6", sig="normal")]
         out, n = judge.auto_merge_duplicates(intel)
-        self.assertEqual(len(out), 1, "3 条同一事件应合成 1 条")
-        self.assertEqual(n, 2)
+        self.assertEqual((len(out), n), (3, 0))
+        self.assertTrue(judge.find_duplicate_intel(intel), "仍须提示 AI 做语义核查")
+
+    def test_merges_identical_content_with_all_sources(self):
+        """相同标题与内容可以确定性合并，完整保留来源与从条。"""
+        title = "DeepSeek V4.1 Flash 正式发布"
+        intel = [self._rec("c1", title), self._rec("c2", title),
+                 self._rec("c3", title, sig="normal")]
+        out, n = judge.auto_merge_duplicates(intel)
+        self.assertEqual((len(out), n), (1, 2))
         main = out[0]
         self.assertEqual(sorted(main["merged_change_ids"]), ["c2", "c3"])
-        self.assertEqual(len(main["sources"]), 3, "三家来源都该并入")
-        self.assertEqual(len(main["merged_titles"]), 2, "被合并的标题要留档")
+        self.assertEqual(len(main["sources"]), 3)
+        self.assertEqual(len(main["merged_titles"]), 2)
+        self.assertEqual(len(main["merged_records"]), 2)
 
     def test_does_not_merge_different_events(self):
         """同一主体的两件不同事不许合并（Kimi 发布 vs Kimi 泄露）。"""
@@ -3213,9 +3222,10 @@ class TestAutoMergeDuplicates(unittest.TestCase):
 
     def test_merged_ids_satisfy_coverage(self):
         """合并后覆盖度校验不能报缺口（merged_change_ids 已被认可）。"""
-        intel = [self._rec("c1", "DeepSeek 新模型上线，价格更低"),
-                 self._rec("c2", "DeepSeek V4.1 Flash 新版本")]
-        out, _ = judge.auto_merge_duplicates(intel)
+        intel = [self._rec("c1", "DeepSeek V4.1 Flash 正式发布"),
+                 self._rec("c2", "DeepSeek V4.1 Flash 正式发布")]
+        out, n = judge.auto_merge_duplicates(intel)
+        self.assertEqual(n, 1, "必须真的发生合并后再验证覆盖度")
         latest = {"changes": [{"change_id": "c1"}, {"change_id": "c2"}]}
         missing = judge.coverage_check(latest, out, [])
         self.assertEqual(missing, [], "被合并的 c2 应通过 merged_change_ids 被认可")

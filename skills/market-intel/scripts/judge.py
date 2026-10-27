@@ -37,7 +37,7 @@ import match as match_mod
 INTEL_KEYS = {"change_id", "type", "significance", "object", "title", "summary", "url",
               "sources", "notify", "notify_reason", "merged_change_ids",
               "discard", "discard_reason", "activity", "number_notes",
-              "suppressed_by_guard", "merged_titles",
+              "suppressed_by_guard", "merged_titles", "merged_records",
               "sales_playbook", "sales_strategy"}
 NOTIFY_KEYS = {"version", "notify", "digest", "bitable"}
 NOTIFY_BLOCK_KEYS = {"user_id", "chat_id", "mention", "hero_image"}
@@ -1234,13 +1234,25 @@ def auto_merge_duplicates(intel, enable=True):
 
     安全阀（**宁可少合并，不可错合并**）：
       - 只合并 `notify=true` 且非 discard 的（归档条目不上卡，合并没有收益）；
-      - 判据仍是「主体 + 事件类型」双维度（见 `find_duplicate_intel`）；
+      - 自动合并要求标题、摘要、分类、销售指引与活动明细一致；
+      - 「主体 + 事件类型」仅生成候选，语义合并仍由 AI 给出 merged_change_ids；
       - `enable=False` 时退化为仅提示，供不确定场景使用。
     """
     if not enable:
         return intel, 0
     live = [r for r in intel if not r.get("discard") and r.get("notify")]
-    clusters = duplicate_clusters(live)
+    # 语义候选仍由 find_duplicate_intel 提示；自动合并只接受正文一致的强证据。
+    # 不用候选的连通分量，避免 A≈B、B≈C 却把不同事件 A/C 一起吞掉。
+    buckets = {}
+    for r in live:
+        title = core.norm(r.get("title") or "").lower()
+        if len(title) < 8:
+            continue
+        key = (title, core.norm(r.get("summary") or ""), r.get("type"),
+               core.norm(r.get("sales_playbook") or ""), core.norm(r.get("sales_strategy") or ""),
+               json.dumps(r.get("activity"), ensure_ascii=False, sort_keys=True))
+        buckets.setdefault(key, []).append(r)
+    clusters = [group for group in buckets.values() if len(group) > 1]
     if not clusters:
         return intel, 0
 
@@ -1257,7 +1269,10 @@ def auto_merge_duplicates(intel, enable=True):
             if not cid or cid in drop_ids:
                 continue
             mids.append(cid)
+            mids.extend(r.get("merged_change_ids") or [])
             drop_ids.add(cid)
+            # 保留从条完整判定和主链接，避免只存标题而失去审计依据。
+            main.setdefault("merged_records", []).append(json.loads(json.dumps(r, ensure_ascii=False)))
             # 来源并入主条（去重，保持原有中文名）
             have = {(s.get("name"), s.get("url")) for s in (main.get("sources") or [])}
             for s in (r.get("sources") or []):
