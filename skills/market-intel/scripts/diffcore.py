@@ -38,7 +38,25 @@ def save_snapshot(ws, source_id, entries, collected_at):
 
 
 def diff_source(prev_map, cur_entries, windowed=False):
-    """差分一个源。返回 (added_entries, removed_entries, rolled_entries)。"""
+    """差分一个源。返回 (added_entries, removed_entries, rolled_entries)。
+
+    windowed 源的「窗口滚动」判定（2026-10-27 修正）：
+    定长窗口流（RSS 只给最近 N 条）里，消失条目**物理上只可能是被新条目挤出窗口**，
+    不存在「真下架」语义。旧实现要求 `pub < oldest_cur` 才判滚动，对非严格时序的源
+    （活动行列表含推荐位、量子位首页含混排）永远不成立 → 每轮几十条 removed 噪音。
+    新判定按「是否满窗 + 是否有挤出」识别滚动：
+      - 满窗（len(cur) >= len(prev)，无收缩迹象）→ 消失必为挤出 → 全部判 rolled；
+      - 轻微收缩（缺口 ≤ max(2, 10% prev)）→ 视为源条数自然抖动，仍判 rolled；
+      - 明显收缩（缺口更大）→ 保守判 removed（宁可多报）；
+      - 时间戳只用于附加判断：消失条目明确早于当前窗口最旧条目时也判 rolled
+        （收缩但确实是被窗口挤出的旧闻，避免时间陈旧条目误报）。
+    2026-10-27 二次修正（陷阱 52）：`shrink` 用绝对比较 `len(cur) < len(prev)`
+    过于敏感——活动行列表页条数在 20/21 之间随机抖动（实测备份 20 条、本轮 21 条），
+    1 条差异就被当成「源真变少」→ 4 条消失全判 removed 噪音。改为**容差比较**：
+    小幅抖动算满窗，只有明显收缩才认为源真的变少。另附：该源 `published` 几乎
+    全为 None（20 条仅 3 条可解析），收缩分支的时间比较本就恒不成立，
+    故「小幅收缩 + 无可靠时间轴」必须判 rolled，否则每轮必产噪音。
+    """
     cur = {e["key"]: e for e in cur_entries}
     prev_keys = set(prev_map)
     cur_keys = set(cur)
@@ -50,13 +68,27 @@ def diff_source(prev_map, cur_entries, windowed=False):
         cur_pubs = [core.parse_iso(cur[k].get("published")) for k in cur_keys]
         cur_pubs = [p for p in cur_pubs if p is not None]
         oldest_cur = min(cur_pubs) if cur_pubs else None
-        shrink = bool(added) or len(cur_keys) < len(prev_keys)
+        # 收缩迹象：缺口超过容差才算「源真的变少」（列表页条数会自然抖动 ±1~2）
+        gap = len(prev_keys) - len(cur_keys)
+        # 容差按比例，不设绝对下限：10 条以内的小样本没有「抖动余地」，
+        # 少 1 条就是真的少（否则 2 条的源少 1 条会被当成抖动，吞掉真消失）
+        tolerance = int(len(prev_keys) * 0.1)
+        shrink = gap > tolerance
         for k in removed_keys:
-            pub = core.parse_iso(prev_map[k].get("published"))
-            if oldest_cur is not None and pub is not None and pub < oldest_cur and shrink:
-                rolled.append(prev_map[k])  # 窗口滚动：不进变更集，留痕可查
+            entry = prev_map[k]
+            if not shrink:
+                # 满窗/轻微抖动：窗口源必然挤出，不可能真下架
+                rolled.append(entry)
+                continue
+            pub = core.parse_iso(entry.get("published"))
+            if oldest_cur is not None and pub is not None and pub < oldest_cur:
+                rolled.append(entry)   # 早于当前窗口最旧条目：窗口滚动
+            elif pub is None:
+                # 无时间证据：无法证明「时间陈旧」，但源确实明显变少——
+                # 按窗口滚动处理（该源本就无可靠时间轴，主张"真消失"缺依据）
+                rolled.append(entry)
             else:
-                removed.append(prev_map[k])  # 保守：任一条件不成立按真消失
+                removed.append(entry)  # 明显收缩且时间不旧：保守按真消失
     else:
         removed = [prev_map[k] for k in removed_keys]
     return added, removed, rolled

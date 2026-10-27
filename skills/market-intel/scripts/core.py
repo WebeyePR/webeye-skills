@@ -45,13 +45,34 @@ def now_iso():
 
 
 def parse_iso(text):
-    """解析 ISO 时间为 Unix 秒；解析不出返回 None（调用方按保守处理）。"""
+    """解析时间为 Unix 秒；解析不出返回 None（调用方按保守处理）。
+
+    必须兼容两种真实形态（2026-10-27 修复）：
+    - ISO 8601：`2026-10-27T10:34:24+08:00`（内部状态文件用）
+    - RFC 2822：`Mon, 26 Oct 2026 18:11:43 GMT`（**RSS/Atom 的 published 原生格式**）
+    此前只认 ISO，RSS 源的 published 全部解析成 None → windowed 源的「窗口滚动」
+    判定（靠 oldest_cur / pub 比较）永久失效 → 滚动条目全被判「真的消失」进变更窗，
+    每轮产出几十条 removed 噪音。全量首扫轮无 prev 快照，故长期潜伏未暴露。
+    """
     if not text:
         return None
+    raw = str(text).strip()
     try:
-        return datetime.fromisoformat(str(text).replace("Z", "+00:00")).timestamp()
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
     except Exception:
-        return None
+        pass
+    # RFC 2822/822 回退（email.utils 是标准库，零依赖）
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(raw)
+        if dt is not None:
+            if dt.tzinfo is None:      # 无时区按 UTC（RSS 惯例）
+                from datetime import timezone
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+    except Exception:
+        pass
+    return None
 
 
 def hours_since(iso_text, now=None):

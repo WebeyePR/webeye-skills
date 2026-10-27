@@ -14,7 +14,30 @@ import argparse
 import json
 import os
 
+import sys
+
 import core
+
+
+def _since_filter(recs, since):
+    """按时间过滤，用**解析后的时间戳**比较而不是字符串（v0.6.6 修）。
+
+    旧实现 `(r.get("logged_at") or "") >= since` 是字典序比较，两个真实问题：
+      ① 跨时区算错：`2026-10-27T06:00:00Z` 与 `2026-10-27T14:00:00+08:00` 是**同一时刻**，
+         但字符串比较 `"06..." < "14..."` → UTC 写法的记录被误判为"早于"，直接漏掉；
+      ② 只给日期（`--since 2026-10-27`）时靠"前缀更长即更大"侥幸成立，属巧合不算正确。
+    解析失败（格式不支持）时退化为字符串比较并告警——宁可近似，不要静默全丢。
+    """
+    since_ts = core.parse_iso(since)
+    if since_ts is None:
+        sys.stderr.write("[warn] --since %r 无法解析为时间，退化为字符串比较（结果可能不准）\n" % since)
+        return [r for r in recs if (r.get("logged_at") or "") >= since]
+    out = []
+    for r in recs:
+        ts = core.parse_iso(r.get("logged_at"))
+        if ts is not None and ts >= since_ts:
+            out.append(r)
+    return out
 
 
 def _print_records(records, fields):
@@ -40,14 +63,14 @@ def main():
     if args.leads:
         recs = core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))
         if since:
-            recs = [r for r in recs if (r.get("logged_at") or "") >= since]
+            recs = _since_filter(recs, since)
         _print_records(recs, ["lead_id", "entity_name", "industries", "matched_group_names",
                               "score", "status", "summary", "url", "logged_at"])
         return 0
     if args.intel:
         recs = core.read_jsonl(os.path.join(ws, "log", "intel.jsonl"))
         if since:
-            recs = [r for r in recs if (r.get("logged_at") or "") >= since]
+            recs = _since_filter(recs, since)
         _print_records(recs, ["change_id", "type", "significance", "title", "url", "logged_at"])
         return 0
     if args.rolled_out:

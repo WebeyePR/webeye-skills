@@ -159,6 +159,25 @@ def _page_keywords(body, spec, cfg):
     return entries
 
 
+_LIST_ORDINAL = re.compile(r"^\s*\d{1,2}\s*[.、．]\s*(?=[\u4e00-\u9fffA-Za-z])")
+
+
+def _strip_list_ordinal(title):
+    """剥掉列表页自带的序号前缀（v0.6.5 修）。
+
+    实测（品牌方舟列表页）：锚文本为「5. AI软硬件公司「Ambi」完成1.74亿元Pre-A轮融资」
+    「4. 揽金6个亿，国产吸尘器在TikTok卖爆了！」——这个「5.」「4.」是**页面列表序号**，
+    不是标题内容。不剥会出两个可见问题：
+      ① 卡片里新闻段本身已有「1. 2. 3.」编号，标题再带「5.」就成了「3. 5. xxx」双重编号，
+         读者会以为漏了 1-4 条；
+      ② 搜索/去重时序号变化（同一内容在不同期排到不同位）会造成标题不一致。
+    只剥**开头**的「数字 + 点/顿号 + 紧跟中文或字母」形态，且要求序号 ≤ 2 位，
+    避免误伤「3D 打印」「5G 芯片」「100 天」这类以数字开头的真实标题
+    （它们后面紧跟的是数字/单位而非点号，或不以「.」分隔）。
+    """
+    return _LIST_ORDINAL.sub("", title or "", count=1)
+
+
 def _page_links(body, spec, cfg):
     """links 模式：锚点 -> 条目（key=规范化 URL，title=锚文本）。"""
     pattern = re.compile(cfg["link_pattern"]) if cfg.get("link_pattern") else None
@@ -178,7 +197,7 @@ def _page_links(body, spec, cfg):
             continue
         if pattern and not pattern.search(link):
             continue
-        title = core.norm(core.strip_tags(anchor_html))
+        title = _strip_list_ordinal(core.norm(core.strip_tags(anchor_html)))
         if len(title) < min_title:
             continue
         seen.add(key)

@@ -272,21 +272,40 @@ def build_pending(ws, cfg):
 
     写入前用当前规则重算匹配：旧规则时代遗留、现在已不满足 scope 硬筛的线索
     （如非中国企业）标记 filtered 并排除——线索池只收当前规则命中的线索。
+
+    **同样重算黑名单**（2026-10-27 补）：`judge.cmd_input` 生成线索时已做
+    `check_denylist` 硬拦截，但这里是**写库前最后一道计算入口**——上一轮就已
+    产出、尚未写入的 pending 线索，若其公司后来被用户加入 `denylist.json`
+    （实测：声网、C 轮公司等），不重新检查就会被写进线索池，直接违背
+    「命中即硬丢弃、绝不上报」。与 scope 失效同样处理：标记 filtered 并排除。
     """
     import facts as facts_mod
     import match as match_mod
     rules = core.jload(os.path.join(ws, "rules.json"), None) or {}
+    deny = match_mod.load_denylist(ws)
     enrichments = load_enrichments(ws)
-    stale, items, updates, used_eids = [], [], [], set()
+    stale, denied, items, updates, used_eids = [], [], [], {}, set()
+    dropped_eids = set()  # 本轮被黑名单/规则淘汰的 entity_id（orphan 护栏要排除它们）
     for ld in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl")):
         if not retryable(ld):
             continue
         fact = facts_mod.load_fact(ws, ld.get("entity_id")) or {}
+        # 黑名单复检（命中即 excluded，绝不入池）——比 scope 更硬，放在最前
+        hit, why = match_mod.check_denylist(
+            fact if fact else {"name": ld.get("entity_name") or "",
+                               "aliases": ld.get("aliases") or []}, deny)
+        if hit:
+            denied.append("%s（%s）" % (ld.get("entity_name") or ld.get("entity_id"), why))
+            updates[ld.get("lead_id")] = {"bitable_status": "filtered",
+                                          "bitable_note": "入池前复检：%s" % why}
+            dropped_eids.add(ld.get("entity_id"))
+            continue
         result = match_mod.evaluate_entity(fact, rules) if fact else {"matched_groups": []}
         if not result["matched_groups"]:
             stale.append(ld.get("entity_name") or ld.get("entity_id"))
             updates[ld.get("lead_id")] = {"bitable_status": "filtered",
                                           "bitable_note": "当前规则不再命中"}
+            dropped_eids.add(ld.get("entity_id"))
             continue
         eid = ld.get("entity_id")
         enr = enrichments.get(eid)
@@ -316,12 +335,19 @@ def build_pending(ws, cfg):
             "record": build_record(ld, fact, cfg, enrichment=enr),
         })
     # 护栏：存在调研却没被任何待写线索消费——多半是 entity_id 写错（静默丢字段的根因）
-    orphan = [e for e in enrichments if e not in used_eids]
+    # 注意排除本轮被黑名单/规则淘汰的线索：它们本就该排除，其调研未被消费属预期，
+    # 不排除会把「正常拦截」误报成「entity_id 不一致」，掩盖真正的笔误（2026-10-27）。
+    filtered_eids = {ld.get("entity_id") for ld in
+                     core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))
+                     if ld.get("bitable_status") == "filtered"} | dropped_eids
+    orphan = [e for e in enrichments if e not in used_eids and e not in filtered_eids]
     if orphan:
         sys.stderr.write("[bitable] 警告：%d 条调研未匹配到任何待写线索（entity_id 不一致？）: %s\n"
                          % (len(orphan), "、".join(orphan)))
     if updates:
         _update_leads(ws, updates)
+    if denied:
+        sys.stderr.write("[bitable] 命中黑名单，已排除（绝不入池）: %s\n" % "、".join(denied))
     if stale:
         sys.stderr.write("[bitable] 按当前规则不再命中，已排除: %s\n" % "、".join(stale))
     payload = {"built_at": core.now_iso(), "base_token": cfg.get("app_token"),

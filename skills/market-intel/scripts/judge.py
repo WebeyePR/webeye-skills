@@ -36,9 +36,10 @@ import match as match_mod
 INTEL_KEYS = {"change_id", "type", "significance", "object", "title", "summary", "url",
               "sources", "notify", "notify_reason", "merged_change_ids",
               "discard", "discard_reason", "activity", "number_notes",
-              "suppressed_by_guard"}
+              "suppressed_by_guard", "merged_titles",
+              "sales_playbook", "sales_strategy"}
 NOTIFY_KEYS = {"version", "notify", "digest", "bitable"}
-NOTIFY_BLOCK_KEYS = {"user_id", "chat_id", "mention"}
+NOTIFY_BLOCK_KEYS = {"user_id", "chat_id", "mention", "hero_image"}
 
 SIG_LABEL = {"high": ("重要", "red"), "normal": ("常规", "violet"), "low": ("次要", "neutral")}
 SIG_ORDER = {"high": 0, "normal": 1, "low": 2}
@@ -138,6 +139,310 @@ def _near(num_str, variants):
     return any(abs(v - c) <= max(0.01, abs(c) * 1e-6) for c in variants)
 
 
+# ---------- 重复内容兜底检查（v0.6.7） ----------
+#
+# 用户实测反馈（2026-10-27）：「卡片里很多信息实际是重复的，虽然标题和文案有些不一样，
+# 但是实际表达内容是一致的，AI 协助和兜底就能很好的处理，为什么还会重？」
+#
+# 事实核对：`references/intel-criteria.md` 早就写了「同一事件多家报道：合并成一条 intel，
+# merged_change_ids 列出被合并的 change_id，只通知一次」——**契约是有的，是我判定时没执行**。
+# 所以这不是脚本 bug，是执行纪律问题。但用户说得对：「兜底」应该存在。
+#
+# 兜底设计取舍（重要）：
+#   **只告警、不自动删**。原因：
+#     ① 判断「两篇是否同一事件」是语义问题——「DeepSeek 降价」与「DeepSeek 登顶开源榜首」
+#        都含 DeepSeek 但是两件事，机械合并就是错改；
+#     ② 自动删会造成静默漏发，比重复更严重（用户的原始诉求是"尽量不漏"）；
+#     ③ 脚本能做的是**把候选挑出来**，让人/模型 3 秒内确认，而不是替它做判断。
+#   这与本技能既有纪律一致：脚本负责确定性的"指出来"，判断留给判断层。
+_DUP_STOP = frozenset("""的 了 和 与 及 在 是 为 将 已 被 对 从 到 等 新 版 发布 上线 宣布
+    元 亿 万 千 百 月 日 年 第 大 小 高 低 多 少 中 内 外 前 后""".split())
+
+
+def _title_tokens(title):
+    """标题 → 用于判重的特征集合（中文二元组 + 拉丁词 + 数字）。
+
+    为什么不用整串相似度：中文标题改写时语序和虚词都会变（「DeepSeek 新模型上线，
+    价格更低」vs「DeepSeek V4.1 Flash 新版本」），整串相似度会偏低而漏判；
+    抽取「实体词 + 关键数字」二元组更稳。
+    """
+    t = core.norm(title or "").lower()
+    toks = set()
+    for w in re.findall(r"[a-z][a-z0-9.+-]{1,}", t):
+        toks.add(w)
+    for num in re.findall(r"\d+(?:\.\d+)?", t):
+        toks.add("#" + num)
+    han = re.findall(r"[\u4e00-\u9fff]+", t)
+    for run in han:
+        if len(run) == 1:
+            continue
+        for i in range(len(run) - 1):
+            bg = run[i:i + 2]
+            if bg not in _DUP_STOP:
+                toks.add(bg)
+    return toks
+
+
+# 型号/通用词：参与"是否同一事件"判断会大量误报，只用于展示、不作锚点
+_MODEL_NOISE = frozenset("""
+ai pro max mini plus ultra flash nano turbo lite beta alpha preview released
+says said new update version model models feature features launch launches
+the and for with from that this will has have been are was its their
+""".split())
+
+# 轮次/融资术语：是"事件"的一部分而不是"主体"，混进实体集会误判
+# （实测：「Ambi 完成 Pre-A 轮」与「橘猫宇宙 完成 Pre-A 轮」因共有 pre-a 被判重复）
+_ENT_STOP = frozenset("""
+pre-a pre-b pre-a+ pre-b+ series seed angel ipo pre-ipo
+""".split())
+
+
+def _title_entities(title):
+    """标题里的「主体实体」：拉丁专名（剔除产品线后缀、通用词、轮次词）。
+
+    为什么要剔除：`gpt-6`、`k3.1`、`pro`、`ai` 这类是**型号/通用词**，
+    「Kimi K3.1 泄露」和「DeepSeek 斩杀 GPT-6」都会带 gpt-6 或 pro，
+    拿它们当锚点会把两件不同的事判成重复（实测误报）。
+    `pre-a`/`series a` 是轮次词，混进来会让两家不同公司的 Pre-A 融资互相判重（实测误报）。
+    主体只保留**品牌/公司/产品名**：deepseek、kimi、meta、qwen、anthropic…
+    """
+    t = core.norm(title or "").lower()
+    ents = set()
+    for w in re.findall(r"[a-z][a-z0-9.+-]*[a-z0-9]|[a-z]{2,}", t):
+        w = w.strip(".")
+        if not w or len(w) < 2:
+            continue
+        if w in _MODEL_NOISE or w in _ENT_STOP:
+            continue
+        if re.fullmatch(r"[a-z]+", w) and len(w) <= 2:
+            continue
+        ents.add(w)
+    return ents
+
+
+def _title_event(text):
+    """标题里的「事件类型」标签集合。
+
+    这是判重能否可用的**决定性维度**：同一个主体可以有多件不同的事——
+      「Kimi 发布 K3.1 Pro」 vs 「Kimi K3.1 泄露成本数据」→ 主体同、事件不同，**不是重复**；
+      「DeepSeek 新模型上线」 vs 「DeepSeek V4.1 Flash 新版本」→ 主体同、事件同，**是重复**。
+    只比主体必然误报（实测 Meta 被罚 vs Meta 合作、Kimi 发布 vs Kimi 泄露 全被误判）。
+
+    词表按「营销/情报」语义归类，不追求语言学完备——宁缺勿滥：
+    漏掉一个词最多是少提示一次，多归一类会造成误报噪音。
+    """
+    t = core.norm(text or "").lower()
+    tags = set()
+    for kw, tag in _EVENT_KWS:
+        if kw in t:
+            tags.add(tag)
+    return tags
+
+
+_EVENT_KWS = [
+    # 发布/上新（含媒体惯用口语：「掀桌」「踢馆」「杀到」都指发新模型抢市场）
+    ("发布", "launch"), ("上线", "launch"), ("推出", "launch"), ("开源", "launch"),
+    ("新版本", "launch"), ("首发", "launch"), ("正式发布", "launch"),
+    ("掀桌", "launch"), ("踢馆", "launch"), ("新模型", "launch"), ("新版本", "launch"),
+    ("迭代", "launch"), ("升级", "launch"),
+    # 价格
+    ("降价", "price"), ("涨价", "price"), ("上调", "price"), ("下调", "price"),
+    ("价格", "price"), ("性价比", "price"), ("免费", "price"),
+    # 融资/资本
+    ("融资", "funding"), ("轮融资", "funding"), ("估值", "funding"),
+    ("上市", "ipo"), ("招股", "ipo"), ("ipo", "ipo"), ("并购", "ma"), ("收购", "ma"),
+    # 风险/合规
+    ("泄露", "leak"), ("罚款", "penalty"), ("处罚", "penalty"), ("禁令", "ban"),
+    ("制裁", "ban"), ("下架", "ban"), ("起诉", "legal"), ("诉讼", "legal"),
+    ("合规", "compliance"), ("监管", "compliance"),
+    # 经营/人事
+    ("裁员", "layoff"), ("离职", "hr"), ("招聘", "hiring"), ("任命", "hr"),
+    ("财报", "earnings"), ("营收", "earnings"), ("利润", "earnings"), ("亏损", "earnings"),
+    # 合作/生态
+    ("合作", "partner"), ("战略投资", "partner"), ("入驻", "partner"),
+    # 榜单/数据
+    ("登顶", "rank"), ("榜首", "rank"), ("榜单", "rank"), ("新晋", "rank"),
+    ("下载量", "metric"), ("月活", "metric"), ("用户数", "metric"),
+]
+
+
+def find_duplicate_intel(records, min_entity=0.5):
+    """找出「疑似同一事件的多条 intel」，返回 [(主条, 疑似重复条, 说明)]。
+
+    **双维度判据**（缺一不可）：
+      ① 主体覆盖：`|实体交集| / |较短一侧实体数| ≥ min_entity`
+      ② 事件一致：两边的**事件类型标签有交集**（发布/降价/融资/泄露/罚款…）
+
+    四次口径迭代的完整教训（全部是实测打出来的，不要退回去）：
+      ① 整串特征重合度 → 早报把多事件塞进一条标题，特征被稀释，
+         「DeepSeek 新模型上线…」vs「iPhone Duo 交付；Kimi K3.1 Pro 发布…」重合度仅 0.36 → 漏判；
+      ② 锚点含型号词（gpt-6/k3.1/pro）→「Kimi K3.1 泄露」与「DeepSeek 斩杀 GPT-6」
+         因共有 gpt-6 被判重复 → 误报；
+      ③ 只比主体实体 →「Kimi 发布」与「Kimi 泄露」主体都是 kimi，覆盖率 1.0 → 误报；
+         「Meta 被罚」与「Meta 合作」同理 → 误报；
+      ④ 现在：**主体 + 事件类型**双维度。这才是真正区分「同一件事被多家报道」
+         与「同一家公司发生了两件不同的事」的判据。
+
+    只用来提示候选，**不修改任何记录、不阻断落盘**。
+    """
+    live = [r for r in records if not r.get("discard") and r.get("title")]
+    feats = []
+    for r in live:
+        ents = _title_entities(r.get("title"))
+        ev = _title_event(r.get("title"))
+        if ents:
+            feats.append((ents, ev, r))
+    out = []
+    for i in range(len(feats)):
+        ei, vi, ri = feats[i]
+        for j in range(i + 1, len(feats)):
+            ej, vj, rj = feats[j]
+            common = ei & ej
+            if not common:
+                continue
+            cover = len(common) / float(min(len(ei), len(ej)))
+            if cover < min_entity:
+                continue
+            # 事件类型必须有交集；两边都判不出事件时按"不重复"处理（保守不乱报）
+            shared_ev = vi & vj
+            if not shared_ev:
+                continue
+            out.append((ri, rj, "%.2f/%s" % (cover, "/".join(sorted(shared_ev)))))
+    return out
+
+
+def duplicate_clusters(intel):
+    """把重复候选聚成簇：返回 [[记录...], ...]，每簇 ≥2 条。
+
+    为什么要聚簇而不是只列对：实测一轮里 DeepSeek 有 4 条（专稿+早报+评测+榜单），
+    两两配对会给出 6 个组合，人看着是噪音；按连通分量聚成 1 簇才好判断"这 4 条其实是一件事"。
+    """
+    dups = find_duplicate_intel(intel)
+    if not dups:
+        return []
+    by_id = {}
+    for ri, rj, _ in dups:
+        by_id[id(ri)] = ri
+        by_id[id(rj)] = rj
+    parent = {k: k for k in by_id}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for ri, rj, _ in dups:
+        a, b = find(id(ri)), find(id(rj))
+        if a != b:
+            parent[a] = b
+    groups = {}
+    for k, rec in by_id.items():
+        groups.setdefault(find(k), []).append(rec)
+    return [g for g in groups.values() if len(g) > 1]
+
+
+def suggest_merges(intel):
+    """生成「合并建议」列表（**只写候选文件，不改 intel**）。
+
+    输出可供人直接改判定的最小信息：主条 change_id + 建议合并进它的 change_id 列表，
+    以及每条的一行摘要（含 URL，便于判断哪条信息更全该当主条）。
+    """
+    clusters = duplicate_clusters(intel)
+    out = []
+    for group in clusters:
+        # 主条选择：significance 高者优先，其次 res 级别（标题短者更像是专稿而非早报聚合）
+        def rank(r):
+            sig = {"high": 0, "normal": 1, "low": 2}.get(r.get("significance"), 3)
+            return (sig, len(r.get("title") or ""))
+        ordered = sorted(group, key=rank)
+        main, rests = ordered[0], ordered[1:]
+        out.append({
+            "keep": main.get("change_id"),
+            "keep_title": main.get("title"),
+            "keep_url": main.get("url"),
+            "merge_ids": [r.get("change_id") for r in rests],
+            "merge_titles": [r.get("title") for r in rests],
+        })
+    return out
+
+
+# 套话模板（v0.6.9）：这些话对任意条目都成立，等于没提供信息。
+# 用户实测原话：「榜单监控的每个内容都很短，都是『xxxx。需人工核实公司主体与融资轮次后
+# 决定是否建联。』，而且信息 AI 不都会调研补全的吗？」
+_BOILERPLATE = [
+    "需人工核实公司主体与融资轮次后决定是否建联",
+    "需人工核实公司主体",
+    "属榜单新面孔",
+    "供了解竞对能力与价格结构，本轮不单独通知",
+    "供区域判断与话术积累，本轮不单独通知",
+    "与八行业出海客户无关或信息量不足，归档留痕",
+]
+
+
+def warn_boilerplate(intel):
+    """检测「套话摘要」：同一句模板话套在多个条目上，等于没写。
+
+    为什么要在代码里拦：我在 v0.6.7 之前的判定里给 4 条榜单写了**完全相同的**
+    "出现在 AI 产品榜，属榜单新面孔。需人工核实公司主体与融资轮次后决定是否建联。"，
+    而详情页明明白白有月活/环比/名次/榜单项可查。这不是数据不可得，是判定偷懒。
+    光在准则里写「必须调研」不够——**写得再好也会被跳过，必须让脚本叫出来**。
+
+    判定口径：`notify=true` 的条目里，摘要命中套话模板 或 长度 < min_len（默认 25 字），
+    即视为可疑。只告警不阻断（内容质量无法机械判死，最终仍由人/模型判断）。
+    """
+    suspicious = []
+    for r in intel:
+        if r.get("discard") or not r.get("notify"):
+            continue
+        s = (r.get("summary") or "").strip()
+        hit = next((b for b in _BOILERPLATE if b in s), None)
+        if hit or len(s) < 25:
+            suspicious.append((r, hit or "摘要过短(%d字)" % len(s)))
+    if not suspicious:
+        return 0
+    sys.stderr.write(
+        "\n[boilerplate] %d 条要通知的内容摘要疑似套话/过短——这类话对任意条目都成立，"
+        "等于没提供信息。\n"
+        "   榜单类必须写详情页能查到的客观数据（榜单项/指标/环比/名次），"
+        "见 references/intel-criteria.md 「榜单新晋必须调研出实质信息」。\n" % len(suspicious))
+    for r, why in suspicious[:10]:
+        sys.stderr.write("   · [%s] %s\n     摘要: %s\n     问题: %s\n"
+                         % (r.get("change_id"), (r.get("title") or "")[:44],
+                            (r.get("summary") or "")[:70], why))
+    if len(suspicious) > 10:
+        sys.stderr.write("   … 还有 %d 条\n" % (len(suspicious) - 10))
+    return len(suspicious)
+
+
+def warn_duplicates(intel, ws=None):
+    """落盘后提示疑似重复，写 stderr（不阻断落盘、不删记录）。
+
+    传 ws 时额外落一份 `out/dup-suggestions.json`，给出可直接照抄的合并方案——
+    光在 stderr 打印「请人工确认」不够，人还得自己找 change_id、判断谁当主条；
+    把这两件事算好写进文件，确认成本从"翻日志"降到"看一眼改一个字"。
+    """
+    dups = find_duplicate_intel(intel)
+    if not dups:
+        return 0
+    clusters = duplicate_clusters(intel)
+    sys.stderr.write(
+        "\n[dup] 检测到 %d 簇疑似同一事件（共涉及 %d 条，标题措辞不同但指向同一件事）。\n"
+        "      契约要求合并成一条：主条 `merged_change_ids` 列出被合并的 change_id，只通知一次。\n"
+        "      **这是提示不是错误**：确认同一事件就按建议合并重跑，是两件事就忽略。\n"
+        % (len(clusters), sum(len(c) for c in clusters)))
+    for i, group in enumerate(clusters, 1):
+        sys.stderr.write("  簇%d（%d 条）:\n" % (i, len(group)))
+        for r in group:
+            sys.stderr.write("     - [%s] %s\n" % (r.get("change_id"), (r.get("title") or "")[:60]))
+    if ws:
+        sug = suggest_merges(intel)
+        path = os.path.join(ws, "out", "dup-suggestions.json")
+        core.jdump(path, {"generated_at": core.now_iso(), "clusters": sug})
+        sys.stderr.write("  合并建议已写入: %s（照它改 judged.json 的 merged_change_ids 即可）\n" % path)
+    return len(dups)
+
+
 # ---------- 覆盖度校验 ----------
 
 def coverage_check(latest, intel, fact_records, already_judged=None):
@@ -216,19 +521,43 @@ def _sources_line(sources):
 
 
 def intel_blocks(records, limit=5):
-    """情报块：重要 -> 常规 -> 次要；块数超限收进末行（纪律与 change-watch 一致）。"""
-    ordered = sorted(records, key=lambda r: SIG_ORDER.get(r.get("significance"), 3))
-    shown, blocks = ordered[:limit], []
+    """情报块：重要 -> 常规 -> 次要。
+
+    **notify=true 全部展示、不截断**（v0.6.5 修，陷阱 58）：本函数是**情报卡**的
+    渲染路径，而情报卡里的记录按定义**全是 notify=true**（`cmd_input` 只把
+    notify=true 的塞进 `notified_intel`，`cmd_digest` 的 simple 降级分支更是直接
+    取窗口内记录）。旧实现 `ordered[:limit]` 硬截断 5 条——9 条通知情报只渲染 5 条，
+    且末行只写"另有 4 条次要动态"（把它们错标成"次要"，实际是**已判要通知的重要
+    内容**）。锚点一推进，这些内容下期不再出现 → 判定成功但永久漏发。
+    陷阱 47 只修了内参卡的活动/新闻/榜单三段，**情报卡这条路径漏了**——
+    与陷阱 48「同类问题要一次查遍所有兄弟位置」完全同型复发。
+    `limit` 仅约束 notify=false 的归档记录（情报卡正常不会传入，留作通用兜底）。
+    """
+    ordered = sorted(records, key=lambda r: (0 if r.get("notify") else 1,
+                                             SIG_ORDER.get(r.get("significance"), 3)))
+    must = [r for r in ordered if r.get("notify")]
+    shown = must + [r for r in ordered if not r.get("notify")][:limit]
+    blocks = []
     for r in shown:
         sig_label, sig_color = SIG_LABEL.get(r.get("significance"), ("常规", "violet"))
         head = "<text_tag color='%s'>%s</text_tag> <text_tag color='neutral'>%s</text_tag> **%s**" % (
             sig_color, sig_label, r.get("type") or "动态", r.get("title") or "")
-        blocks.append(_block([head, r.get("summary") or "", _sources_line(r.get("sources") or [])]))
+        parts = [head, r.get("summary") or ""]
+        # 销售弹药：情报卡同样必须带（2026-10-27 用户明令"缺少真正的销售弹药"）。
+        # 这条渲染路径独立于 _news_elements——当初只改了内参卡会漏掉情报卡，
+        # 用户看到情报卡就看不见销售建议（实测缺陷）。
+        if r.get("sales_playbook"):
+            parts.append("**【销售对标指引】** %s" % r["sales_playbook"])
+        if r.get("sales_strategy"):
+            parts.append("**【销售战略建议】** %s" % r["sales_strategy"])
+        parts.append(_sources_line(r.get("sources") or []))
+        blocks.append(_block(parts))
     if not blocks:
         return blocks, 0
-    if len(ordered) > limit:
+    if len(ordered) > len(shown):
         blocks.append({"tag": "markdown",
-                       "content": "<font color='grey'>另有 %d 条次要动态</font>" % (len(ordered) - limit),
+                       "content": "<font color='grey'>另有 %d 条动态（notify=false 归档）</font>"
+                                  % (len(ordered) - len(shown)),
                        "text_size": "notation"})
     else:
         blocks[-1]["margin"] = "0px"
@@ -267,8 +596,14 @@ def _active(leads):
 
 
 def lead_blocks(leads, limit=5, view_url=None):
+    """线索卡（私信/群）：同 `_lead_elements` 的截断纪律（v0.6.5）。
+
+    notify=true 全展示；notify=false 才按 limit 收敛——线索卡若漏了 P0，
+    群卡就是"催建联却不给人名"，现场无法跟进。
+    """
     leads = _active(leads)
-    shown = leads[:limit]
+    must = [l for l in leads if l.get("notify")]
+    shown = must + [l for l in leads if not l.get("notify")][:limit]
     blocks = []
     for ld in shown:
         pri_label, pri_color = PRIORITY_LABEL.get(ld.get("priority") or "P1", PRIORITY_LABEL["P1"])
@@ -298,9 +633,10 @@ def lead_blocks(leads, limit=5, view_url=None):
                                pool_url, size="small"))
         blocks.append(_block(els, color="violet" if lead_exists(ld)
                              else ("red" if ld.get("priority") == "P0" else "green")))
-    if len(leads) > limit:
+    if len(leads) > len(shown):
         blocks.append({"tag": "markdown",
-                       "content": "<font color='grey'>另有 %d 条线索</font>" % (len(leads) - limit),
+                       "content": "<font color='grey'>另有 %d 条归档线索（notify=false）</font>"
+                                  % (len(leads) - len(shown)),
                        "text_size": "notation"})
     if blocks:
         blocks[-1]["margin"] = "0px"
@@ -339,10 +675,143 @@ def save_leads_latest(ws, new_leads, now, touched):
     return carried
 
 
+# ---------- 卡片体积护栏（飞书硬上限，v0.6.6） ----------
+# 官方限制（2026-10-27 核实，两处来源一致）：
+#   ① 卡片/富文本消息请求体 **最大 30KB**（错误码 230025 / 200860 "card size exceeds limit"）
+#   ② JSON 2.0 结构单卡最多 **200 个元素或组件**（错误码 300305）
+# 来源：open.feishu.cn/document/server-docs/im-v1/faq（"建议 JSON 长度不超过 30KB"）
+#      open.feishu.cn/document/cardkit-v1/card-element/create（300305 明确 200 个）
+#
+# 为什么必须有这道护栏（2026-10-27 实测，本技能自己的回归）：
+#   v0.6.5 把 notify=true 从「截断」改成「全部展示」——方向是对的（防永久漏发），
+#   但**没有同时处理体积**，导致单张内参卡膨胀到 39.6KB（compact 序列化）、
+#   177 个元素，**双双超过飞书硬上限**，发送必然报 230025 失败。
+#   而这个失败发生在**锚点推进之后**（`--digest --commit` 先产卡后推锚），
+#   内容被标记已通报 → 永久丢失。这比原来的截断更糟：截断至少发出去了。
+#
+# 设计取舍：**分片而不是截断**。
+#   用户明令 notify=true 不许漏发；销售指引是必填内容不能砍。
+#   两者与 30KB 上限的冲突只能靠「拆成多张卡」解决。
+CARD_MAX_BYTES = 30000      # 30KB 上限，留 720 字节余量给外层信封
+CARD_MAX_ELEMENTS = 190     # 200 元素上限，留 10 个余量给 header/分片标记
+
+
+def card_bytes(card):
+    """按飞书实际发送形态（compact 序列化）计算字节数。"""
+    return len(json.dumps(card, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def card_element_count(card):
+    """统计元素/组件总数（含 interactive_container 内嵌的子元素）。"""
+    n = 0
+
+    def walk(o):
+        nonlocal n
+        if isinstance(o, dict):
+            if "tag" in o:
+                n += 1
+            for k, v in o.items():
+                if k in ("elements", "columns", "fields"):
+                    walk(v)
+                elif isinstance(v, (dict, list)) and k not in ("text", "fields"):
+                    walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    walk((card.get("body") or {}).get("elements") or [])
+    return n
+
+
+def split_card(card, max_bytes=CARD_MAX_BYTES, max_elements=CARD_MAX_ELEMENTS):
+    """把超限的卡片按 body.elements 顺序切成多张，保证每张都在上限内。
+
+    切分纪律：
+      - 只在**顶层 elements 边界**切（不在容器内部切，避免半个块）；
+      - 每片继承原 header，标题追加「（1/3）」分片标记，便于读者判断完整性；
+      - 单片就超限（单个元素比上限还大）→ 该元素单独成卡并在 stderr 告警，
+        不静默丢弃（宁可它自己报错，也不让内容消失）；
+      - 返回 [card] 表示无需切分（调用方按原样发送）。
+    """
+    if not card:
+        return [card]
+    els = (card.get("body") or {}).get("elements") or []
+    if not els:
+        return [card]
+    if card_bytes(card) <= max_bytes and card_element_count(card) <= max_elements:
+        return [card]
+
+    # 贪心装箱：逐元素累加，超限前收一片
+    chunks, cur = [], []
+    for el in els:
+        trial = cur + [el]
+        probe = {**card, "body": {**(card.get("body") or {}), "elements": trial}}
+        if cur and (card_bytes(probe) > max_bytes or card_element_count(probe) > max_elements):
+            chunks.append(cur)
+            cur = [el]
+        else:
+            cur = trial
+    if cur:
+        chunks.append(cur)
+
+    out = []
+    total = len(chunks)
+    for i, chunk in enumerate(chunks, 1):
+        sub = {**card, "body": {**(card.get("body") or {}), "elements": chunk}}
+        if total > 1:
+            hdr = dict((card.get("header") or {}))
+            t = dict(hdr.get("title") or {})
+            t["content"] = "%s（%d/%d）" % (t.get("content") or "", i, total)
+            hdr["title"] = t
+            sub["header"] = hdr
+        size = card_bytes(sub)
+        if size > max_bytes or card_element_count(sub) > max_elements:
+            sys.stderr.write(
+                "[card-size][warn] 第 %d/%d 片仍超限（%d 字节 / %d 元素，上限 %d/%d）——"
+                "单个内容块过大，飞书可能拒收，请缩短该条正文\n"
+                % (i, total, size, card_element_count(sub), max_bytes, max_elements))
+        out.append(sub)
+    return out
+
+
+def _flatten(items):
+    """展平 write_card 的返回值（path 字符串 / 分片 path 列表），并过滤 None。
+
+    过滤 None 是必要的：`cmd_digest` 在 briefing 渲染返回 None（全空不产卡）时
+    会得到 `_flatten([None])`——若不过滤就成了 `[None]`，布尔为真，
+    会**跳过 simple 降级分支**导致一张卡都不产（2026-10-27 重构时实测踩到）。
+    """
+    out = []
+    for it in items or []:
+        if isinstance(it, (list, tuple)):
+            out.extend(x for x in it if x)
+        elif it:
+            out.append(it)
+    return out
+
+
 def write_card(ws, name, card):
-    path = os.path.join(ws, "out", name)
-    core.jdump(path, card)
-    return path
+    """写卡唯一出口：先过体积护栏，超限自动分片（v0.6.6）。
+
+    返回**path 或 path 列表**（兼容历史单张语义：未超限时仍是字符串）。
+    分片文件名插入 `-p2`/`-p3` 后缀，保持字典序与片序一致。
+    """
+    parts = split_card(card) if card else [card]
+    if len(parts) == 1:
+        path = os.path.join(ws, "out", name)
+        core.jdump(path, parts[0])
+        return path
+    base, ext = os.path.splitext(name)
+    paths = []
+    for i, part in enumerate(parts, 1):
+        p = os.path.join(ws, "out", "%s-p%d%s" % (base, i, ext))
+        core.jdump(p, part)
+        paths.append(p)
+    sys.stderr.write(
+        "[card-size] %s 超飞书上限（30KB / 200 元素），已自动切成 %d 张，"
+        "**全部都要发送**，否则分片内容会丢失（防漏发优先于少发消息）\n"
+        % (name, len(parts)))
+    return paths
 
 
 # ---------- 内参卡（需求文档版式：活动日历 / 行业重点新闻 / 榜单监控 / 潜在客户与业务情报） ----------
@@ -352,6 +821,155 @@ BRIEFING_IMGS = {
     "banner": "img_v3_0212n_1afbec4c-f128-436a-8e46-3f4a29fcd41g",
     "icon": "img_v3_027m_91fb8fc2-e6a3-406c-aa9d-04569e29bccg",
 }
+
+
+def _upload_hero_image(local_path):
+    """上传本地图片到飞书换取 image_key（im:resource scope，user 身份与发卡身份一致）。
+
+    失败返回 None（调用方回退默认头图，不阻断产卡）。规范：≤10M、高:宽 ≤16:9。
+    """
+    import subprocess
+    cmd = ["lark-cli", "im", "images", "create", "--as", "user",
+           "--data", '{"image_type":"message"}', "--file", local_path]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write("[hero] 上传命令执行失败: %s\n" % exc)
+        return None
+    out = proc.stdout or ""
+    try:
+        payload = json.loads(out[out.find("{"):out.rfind("}") + 1])
+        if payload.get("ok") is False:
+            raise ValueError(payload.get("error") or "ok=false")
+        key = (payload.get("data") or {}).get("image_key")
+        if not key:
+            # 兼容顶层直接返回 image_key 的响应形态
+            key = payload.get("image_key")
+        if not key:
+            raise ValueError("响应未含 image_key: %s" % out[:200])
+        return key
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write("[hero] 上传响应解析失败: %s | stderr: %s\n"
+                         % (exc, (proc.stderr or "")[:200]))
+        return None
+
+
+_IMG_KEY_RE = re.compile(r"img_v\d+[0-9a-z]*_[0-9A-Za-z_-]+")
+
+
+def _extract_image_key(text):
+    """从任意文本（如飞书图片分享链接、混排消息）中提取 image_key。
+
+    同一租户内飞书图片链接与裸 key 等价（image_key 租户级通用）。
+    """
+    if not text:
+        return None
+    m = _IMG_KEY_RE.search(text)
+    return m.group(0) if m else None
+
+
+def _download_image(url, dst_path):
+    """下载图片到本地（≤10M）。失败抛异常，由调用方兜底回退默认头图。
+
+    本机回环地址旁路系统代理（代理通常不转发 127.0.0.1，会 502）。
+    """
+    import urllib.request
+    handlers = []
+    host = (urllib.request.urlparse(url).hostname or "").lower()
+    if host in ("127.0.0.1", "localhost", "::1"):
+        handlers.append(urllib.request.ProxyHandler({}))
+    req = urllib.request.Request(url, headers={"User-Agent": "market-intel/1.0"})
+    opener = urllib.request.build_opener(*handlers)
+    with opener.open(req, timeout=30) as resp:
+        data = resp.read(10 * 1024 * 1024 + 1)
+    if not data or len(data) > 10 * 1024 * 1024:
+        raise ValueError("图片为空或超过 10M")
+    if len(data) < 100:
+        raise ValueError("响应过小，疑似非图片内容")
+    with open(dst_path, "wb") as f:
+        f.write(data)
+
+
+def resolve_banner_key(ws, hero_image=None):
+    """解析内参头图 img_key。优先级：CLI --hero-image > notify.hero_image > 代码默认 None。
+
+    智能识别输入形态（2026-10-27 用户要求：充分发挥 AI/脚本智能兜底，不呆板）：
+    - 裸 image_key（img_v…）→ 直通；
+    - 飞书图片链接（内嵌 image_key，同租户）→ 提取 key 直通；
+    - http(s) 图片链接 → 下载临时文件后上传（URL 与内容双级缓存）；
+    - 本地路径 → 上传（文件 sha1 缓存）；
+    - 其他混合文本 → 尽力提取内嵌 key；仍失败回退默认图，不阻断产卡。
+    缓存统一放 state/hero_images.json，同链接/同图绝不重复上传。
+    """
+    src = hero_image
+    if not src:
+        src = (load_notify(ws).get("notify") or {}).get("hero_image")
+    if not src:
+        return None
+    src = str(src).strip()
+    if src.startswith("img_"):
+        return src
+    import hashlib
+    cache_path = os.path.join(ws, "state", "hero_images.json")
+    cache = core.jload(cache_path, {})
+
+    embedded = _extract_image_key(src)
+    low = src.lower()
+
+    # ① 飞书图片链接：内嵌 key 同租户直通，无需上传
+    if embedded and ("://" in src or ("/" in src and not os.path.isfile(src))):
+        return embedded
+
+    # ② http(s) 图片链接：下载后上传，URL 级 + 内容级双缓存
+    if low.startswith("http://") or low.startswith("https://"):
+        url_cache_key = "url:" + hashlib.sha1(src.encode("utf-8")).hexdigest()
+        if url_cache_key in cache:
+            return cache[url_cache_key]
+        import tempfile
+        # 临时文件必须放 /tmp：macOS /var/folders 默认临时目录会被 lark-cli
+        # 拒绝读取（2026-10-27 实测 cannot open file，与权限位无关）
+        fd, tmp = tempfile.mkstemp(suffix=".png", prefix="mi-hero-", dir="/tmp")
+        os.close(fd)
+        try:
+            _download_image(src, tmp)
+            digest = hashlib.sha1(open(tmp, "rb").read()).hexdigest()
+            if digest in cache:
+                cache[url_cache_key] = cache[digest]
+                core.jdump(cache_path, cache)
+                return cache[digest]
+            key = _upload_hero_image(tmp)
+            if key:
+                cache[digest] = key
+                cache[url_cache_key] = key
+                core.jdump(cache_path, cache)
+            return key
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write("[hero] 图片链接处理失败，回退默认: %s\n" % exc)
+            return None
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+    # ③ 本地路径：上传并按内容缓存
+    if os.path.isfile(src):
+        digest = hashlib.sha1(open(src, "rb").read()).hexdigest()
+        if digest in cache:
+            return cache[digest]
+        key = _upload_hero_image(src)
+        if key:
+            cache[digest] = key
+            core.jdump(cache_path, cache)
+        return key
+
+    # ④ 兜底：混杂文本里可能内嵌 key；再不行明确告警回退默认
+    if embedded:
+        return embedded
+    sys.stderr.write("[hero] 头图输入无法识别（非路径/链接/key），回退默认: %s\n"
+                     % src[:120])
+    return None
+
 LEAD_POOL_VIEW_URL = "https://webeye.feishu.cn/base/K1GrbusPBadZzws1DhjcPTionsf?table=tblIJG9zaVi1I7iM&view=vewHOTnMQa"
 
 
@@ -366,23 +984,31 @@ def _section_heading(text):
             "margin": "16px 0px 4px 0px"}
 
 
-def _activity_elements(records, limit=8):
+def _activity_elements(records, limit=8, max_notify=15):
     """活动日历段：judged 里 type=活动情报 且带 activity 明细的记录。
 
     行内粗体闭合符后必须跟空格（`**时间：** 值`）：全角标点+紧贴正文会让
     markdown 粗体失效、星号原样显示（实测陷阱）。
 
-    limit=8 而非 3：活动条目为单行短文本不爆卡；截断的 notify=true 活动
-    在锚点推进后会永久漏发（logged_at 早于新锚点，违反宁重勿漏——2026-10-27
-    洁净重置积压 5 活动实测截掉 2 条从未发出的）。日常窗口活动仅 1-2 条，
-    上限只在积压场景生效。
+    **notify=true 的活动必须全部展示，不得截断**（与新闻段/榜单段同一纪律，
+    陷阱 45/47）：截断的 notify=true 条目在锚点推进后 `logged_at` 早于新锚点，
+    下期永不出现 → 永久漏发。此前只把 limit 从 3 提到 8（治标），积压超过 8 条
+    仍会漏；本次改为与新闻段同构——notify=true 全展示，notify=false 才按 limit。
+    `notify=false` 属归档语义，按 limit 少量补充即可。
     """
     els = []
-    # significant 排序后再截断：high 活动不能被原序靠前的 normal 挤出日历
-    # （2026-10-26 实测：high 物流展排在第 2 位侥幸入选，列表顺序一变就会漏）
+    # 排序：notify 优先（必须展示），同组内 high 优先——high 活动不能被原序
+    # 靠前的 normal 挤出日历（2026-10-26 实测：high 物流展第 2 位侥幸入选）
     acts = [x for x in records if (x.get("activity") and not x.get("discard"))]
-    acts.sort(key=lambda x: 0 if x.get("significance") == "high" else 1)
-    for r in acts[:limit]:
+    acts.sort(key=lambda x: (0 if x.get("notify") else 1,
+                             0 if x.get("significance") == "high" else 1))
+    must = [r for r in acts if r.get("notify")]
+    if len(must) > max_notify:
+        sys.stderr.write("[warn] 本轮 notify=true 活动 %d 条超过 %d 阈值——疑似判定过松"
+                         "（见陷阱 44：low 不该通知）。为保证不漏发仍全部展示，请复核口径。\n"
+                         % (len(must), max_notify))
+    shown = must + [r for r in acts if not r.get("notify")][:limit]
+    for r in shown:
         a = r["activity"]
         lines = ["**%s**" % (a.get("name") or r.get("title") or "未命名活动")]
         if a.get("time"):
@@ -390,7 +1016,13 @@ def _activity_elements(records, limit=8):
         if a.get("location"):
             lines.append("**地点：** %s" % a["location"])
         if a.get("highlight"):
-            lines.append("**看点：** %s" % a["highlight"])
+            # 容错：判定数据若自带「看点：」前缀会渲染成「看点：看点：…」
+            # （2026-10-27 实测 18 条历史数据受此污染，源因是契约示例误写前缀）。
+            # 契约侧已改（activities-criteria.md 明确不带前缀），此处兜底去重，
+            # 避免历史/手写数据的既有前缀再次污染卡面。
+            hl = re.sub(r"^\s*(?:看\s*点\s*[:：]\s*)+", "", str(a["highlight"]))
+            if hl:
+                lines.append("**看点：** %s" % hl)
         if r.get("sources"):
             lines.append(_sources_line(r["sources"]))
         els.append({"tag": "markdown", "content": "\n".join(lines), "text_size": "notation"})
@@ -399,19 +1031,48 @@ def _activity_elements(records, limit=8):
     return els
 
 
-def _news_elements(records, limit=3):
+def _news_elements(records, limit=3, max_notify=15):
     """行业重点新闻段：编号红字标题 + 摘要 + 原文按钮。
 
     纵深防御：无 title 的记录跳过且不占编号（上游护栏之外的最后防线，防坏卡）。
+
+    **notify=true 的记录必须全部展示，不得截断**（2026-10-27 实测漏发，陷阱 45）：
+    截断的 notify=true 条目在锚点推进后 `logged_at` 早于新锚点，下期永不出现
+    → 永久漏发。活动日历段当初正因同一原因把 limit 从 3 提到 8；新闻段漏了
+    同样的修复（实测 02:40 轮 86 条曾通知情报只展示了 3 条，83 条从未真正送达）。
+    `notify=false` 属归档语义，按 `limit` 少量补充展示即可。
+
+    max_notify 是**告警阈值不是截断阈值**：超过时说明判定过松（陷阱 42 要求
+    low 不通知），输出告警让人复核判定；但代码不静默截断——宁可卡长/发送报错
+    （可观测），也不漏发（静默）。
     """
     els = []
-    shown = sorted([r for r in records if not r.get("discard") and r.get("title")],
-                   key=lambda r: SIG_ORDER.get(r.get("significance"), 3))[:limit]
+    pool = [r for r in records if not r.get("discard") and r.get("title")]
+    # 排序：notify 优先（必须展示），同组内按 significance
+    pool.sort(key=lambda r: (0 if r.get("notify") else 1,
+                             SIG_ORDER.get(r.get("significance"), 3)))
+    must = [r for r in pool if r.get("notify")]
+    rest = [r for r in pool if not r.get("notify")]
+    if len(must) > max_notify:
+        sys.stderr.write("[warn] 本轮 notify=true 情报 %d 条超过 %d 阈值——疑似判定过松"
+                         "（见陷阱 42：low 不该通知）。为保证不漏发仍全部展示，"
+                         "请复核判定口径；卡可能过长导致发送失败。\n"
+                         % (len(must), max_notify))
+    shown = must + rest[:limit]
     for i, r in enumerate(shown, 1):
         els.append({"tag": "markdown",
                     "content": "<font color='red'>**%d. %s**</font>" % (i, r.get("title") or "")})
         if r.get("summary"):
             els.append({"tag": "markdown", "content": r["summary"], "text_size": "notation"})
+        # 销售弹药（2026-10-27 用户明令）：技术战报配【销售对标指引】、战略风向配
+        # 【销售战略建议】——用户原话"缺少真正的销售弹药"。必须显著展示（灰底块），
+        # 不能只在 JSON 里躺着。字段由 judge 侧护栏保证非空。
+        if r.get("sales_playbook"):
+            els.append({"tag": "markdown",
+                        "content": "**【销售对标指引】** %s" % r["sales_playbook"]})
+        if r.get("sales_strategy"):
+            els.append({"tag": "markdown",
+                        "content": "**【销售战略建议】** %s" % r["sales_strategy"]})
         if r.get("sources"):
             els.append({"tag": "markdown", "content": _sources_line(r["sources"]),
                         "text_size": "notation"})
@@ -428,9 +1089,15 @@ def _rank_elements(records, limit=4):
     基线有本轮新出现 = added）与 AI 判断（rank_new_entry kind）两处已保证，这里只做展示。
     """
     els = []
-    shown = [r for r in records if not r.get("discard") and "榜单" in (r.get("type") or "")]
-    shown.sort(key=lambda r: SIG_ORDER.get(r.get("significance"), 3))
-    for r in shown[:limit]:
+    pool = [r for r in records if not r.get("discard") and "榜单" in (r.get("type") or "")]
+    # 与新闻段同纪律（陷阱 45/46）：notify=true 不得被 limit 截断（锚点推进后
+    # logged_at 早于新锚点 → 永久漏发）。榜单记录多为 notify=false 归档语义，
+    # 但一旦判定为要通知就必须展示。
+    pool.sort(key=lambda r: (0 if r.get("notify") else 1,
+                             SIG_ORDER.get(r.get("significance"), 3)))
+    must = [r for r in pool if r.get("notify")]
+    shown = must + [r for r in pool if not r.get("notify")][:limit]
+    for r in shown:
         els.append({"tag": "markdown",
                     "content": "<font color='red'>**🏆 %s**</font>" % (r.get("title") or "")})
         if r.get("summary"):
@@ -438,8 +1105,12 @@ def _rank_elements(records, limit=4):
         if r.get("sources"):
             els.append({"tag": "markdown", "content": _sources_line(r["sources"]),
                         "text_size": "notation"})
-        if r.get("url"):
-            els.append(_button("查看榜单原文", r["url"]))
+        # v0.6.8（2026-10-27 用户明令）：**不再为榜单条目渲染「查看榜单原文」按钮**。
+        # 依据：榜单记录的 url 与 sources[0].url 实测 4/4 完全一致，而 `sources_line`
+        # 本身就把媒体名渲染成可点链接，所以删按钮**不丢任何跳转能力**，只去掉一份
+        # 视觉冗余（每个按钮约 200 字节，且与正上方的来源链接指向同一地址）。
+        # 注意：其余段落的按钮（新闻「让我看看👀」、活动「报名」、线索「查看线索」）
+        # 一律保持原样——用户只点了榜单这一处，不做任何连带改动。
     return els
 
 
@@ -447,11 +1118,20 @@ def _lead_elements(leads, limit=3, view_url=None):
     """潜在客户段：公司名按钮 + 文档字段式描述 + 猎隼线索池登记按钮（record 级定位）。
 
     P0 优先、同优先级按时间倒序——新线索不许被旧线索占掉展示位。
+
+    **notify=true 的线索必须全部展示、不截断**（v0.6.5 修，陷阱 58）：
+    线索段此前是四段里唯一没做 notify 豁免的（陷阱 47 声称"四段统一口径"，
+    实际只落地了活动/新闻/榜单三段）。`limit=3` 硬截断时，第 4 条起的 P0 线索
+    虽然判了"要通知"，但**永远不进内参卡**；锚点推进后 `logged_at` 早于新锚点，
+    下期也不再出现 → 永久漏发。P0 线索是市场同事的当期建联清单，漏发 = 直接
+    丢商机（比漏一条资讯严重）。`limit` 仅约束 notify=false 的归档线索。
     """
     els = []
     ranked = sorted(_active(leads), key=lambda l: (l.get("priority") != "P0",
                                                    core.parse_iso(l.get("logged_at")) or 0), reverse=True)
-    for ld in ranked[:limit]:
+    must = [l for l in ranked if l.get("notify")]
+    shown = must + [l for l in ranked if not l.get("notify")][:limit]
+    for ld in shown:
         pri_label, _ = PRIORITY_LABEL.get(ld.get("priority") or "P1", PRIORITY_LABEL["P1"])
         lines = ["**%s ｜ %s**" % (ld.get("entity_name") or "未命名", pri_label)]
         if lead_exists(ld):
@@ -481,10 +1161,10 @@ def _lead_elements(leads, limit=3, view_url=None):
     return els
 
 
-def briefing_card(records, leads, view_url=None):
+def briefing_card(records, leads, view_url=None, banner_key=None):
     """需求文档版式内参卡：活动日历 / 行业重点新闻 / 榜单监控（有数据才出现）/ 潜在客户与业务情报。
-    全空返回 None（当天无内容不产空卡）。"""
-    body = [{"tag": "img", "img_key": BRIEFING_IMGS["banner"], "preview": True,
+    全空返回 None（当天无内容不产空卡）。banner_key 传入时覆盖默认头图（自定义活动图）。"""
+    body = [{"tag": "img", "img_key": banner_key or BRIEFING_IMGS["banner"], "preview": True,
              "transparent": False, "scale_type": "fit_horizontal",
              "alt": {"tag": "plain_text", "content": "市场团队内参"},
              "corner_radius": "10px"}]
@@ -492,8 +1172,20 @@ def briefing_card(records, leads, view_url=None):
     if act_els:
         body.append(_section_heading("📅 WebEye活动日历"))
         body += act_els
-    news_els = _news_elements([r for r in records if r.get("type") != "活动情报"
-                               and "榜单" not in (r.get("type") or "")])
+    # v0.6.5 修：type=活动情报 但**缺 activity 明细**时，旧实现会被活动段（要求
+    # `x.get("activity")`）抛弃，同时又被新闻段的 type!="活动情报" 过滤掉 →
+    # 两头落空，`briefing_card` 甚至可能返回 None（全空不产卡）→ notify=true
+    # 的活动情报永久漏发。activity 明细可能因富化失败/判定漏填而缺失，这属于
+    # 数据瑕疵，不该让内容消失：把它降级交给新闻段按普通情报渲染（有 title 就能显示）。
+    act_ids = {id(r) for r in records if r.get("activity") and not r.get("discard")}
+    news_pool = [r for r in records
+                 if "榜单" not in (r.get("type") or "")
+                 and (r.get("type") != "活动情报" or id(r) not in act_ids)]
+    if any(r.get("type") == "活动情报" and id(r) not in act_ids and r.get("notify")
+           and not r.get("discard") for r in records):
+        sys.stderr.write("[warn] 存在 notify=true 的活动情报但缺 activity 明细"
+                         "（name/time/location），已降级按普通情报渲染——请回判据补全 activity\n")
+    news_els = _news_elements(news_pool)
     if news_els:
         body.append({"tag": "hr"})
         body.append(_section_heading("🔥 行业重点新闻"))
@@ -523,6 +1215,70 @@ def briefing_card(records, leads, view_url=None):
 
 
 # ---------- 主流程：judged.json 落盘 ----------
+
+def auto_merge_duplicates(intel, enable=True):
+    """**自动合并疑似重复**：把从条并进主条，返回 (新 intel, 合并掉的数量)。
+
+    v0.6.7 加这个函数的原因（用户实测反馈）：
+      「很多信息实际是重复的…AI 协助和兜底就能很好的处理，为什么还会重？」
+    `warn_duplicates()` 只提示不够——提示了没人改，卡片上照样重复。用户明确说
+    「兜底就能很好的处理」，所以这里把兜底做成**真的会合并**。
+
+    合并语义（与 `merged_change_ids` 契约完全一致，不新造字段）：
+      - 主条：按 significance 高 → 标题短（更像专稿而非早报聚合）挑；
+      - 从条：`change_id` 进主条 `merged_change_ids`，`sources` 并进主条（去重），
+        内容**不丢**（标题候选进主条 `merged_titles` 供溯源），然后从 intel 移除。
+      - 被合并的从条会由 `coverage_check` 通过 `merged_change_ids` 认可，
+        不会因为"少答了"而报覆盖度缺口。
+
+    安全阀（**宁可少合并，不可错合并**）：
+      - 只合并 `notify=true` 且非 discard 的（归档条目不上卡，合并没有收益）；
+      - 判据仍是「主体 + 事件类型」双维度（见 `find_duplicate_intel`）；
+      - `enable=False` 时退化为仅提示，供不确定场景使用。
+    """
+    if not enable:
+        return intel, 0
+    live = [r for r in intel if not r.get("discard") and r.get("notify")]
+    clusters = duplicate_clusters(live)
+    if not clusters:
+        return intel, 0
+
+    drop_ids = set()
+    for group in clusters:
+        def rank(r):
+            sig = {"high": 0, "normal": 1, "low": 2}.get(r.get("significance"), 3)
+            return (sig, len(r.get("title") or ""))
+        ordered = sorted(group, key=rank)
+        main, rests = ordered[0], ordered[1:]
+        mids = []
+        for r in rests:
+            cid = r.get("change_id")
+            if not cid or cid in drop_ids:
+                continue
+            mids.append(cid)
+            drop_ids.add(cid)
+            # 来源并入主条（去重，保持原有中文名）
+            have = {(s.get("name"), s.get("url")) for s in (main.get("sources") or [])}
+            for s in (r.get("sources") or []):
+                key = (s.get("name"), s.get("url"))
+                if key not in have:
+                    main.setdefault("sources", []).append(s)
+                    have.add(key)
+            # 原标题留档（哪些报道被合并，事后可查）
+            main.setdefault("merged_titles", []).append(r.get("title"))
+        if mids:
+            main["merged_change_ids"] = list(dict.fromkeys(
+                (main.get("merged_change_ids") or []) + mids))
+
+    if not drop_ids:
+        return intel, 0
+    kept = [r for r in intel if r.get("change_id") not in drop_ids]
+    sys.stderr.write(
+        "[dedupe] 自动合并 %d 条重复报道到 %d 个主条（合并关系记在 merged_change_ids，"
+        "来源已并入主条，原标题留在 merged_titles 可溯源）\n"
+        % (len(drop_ids), len(clusters)))
+    return kept, len(drop_ids)
+
 
 def absorb_discards(judged):
     """把顶层 `discarded` 键自动并入 intel 列表并返回 (intel, 是否并入)。
@@ -630,6 +1386,9 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
     if absorbed:
         sys.stderr.write("[absorb] 检测到顶层 discarded 键（%d 条弃权），已自动并入 intel——"
                          "下次构建可直接只填 intel 列表\n" % len(judged.get("discarded") or []))
+    # 同一事件多源报道的自动合并（v0.6.7，用户实测反馈：卡片重复）。
+    # 放在 sent-guard 之前：先合并能让"被合并的从条"也进已发登记，防换源重推。
+    intel, merged_n = auto_merge_duplicates(intel)
     if already_sent:
         sent_path = os.path.expanduser(already_sent)
         cut = (core.parse_iso(sent_before) or 0) if sent_before else None
@@ -666,6 +1425,33 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
     if bad_notify:
         sys.stderr.write("[coverage] 以下 notify=true 情报缺 title/url（无法产卡，"
                          "标题与链接必须从 latest.json 原文带回）:\n  %s\n" % "\n  ".join(bad_notify))
+        raise SystemExit(2)
+
+    # 销售指引护栏（2026-10-27 用户明令）：技术战报/价格战必须给 sales_playbook，
+    # 战略风向必须给 sales_strategy。用户原话："缺少真正的销售弹药"——没有销售动作
+    # 的资讯对他等于噪音。空值/占位符/过短一律拦下（脚本只说"有没有"，
+    # "好不好"由 AI 内容核查把关，见 SKILL.md 工作流第 7 步）。
+    _MIN_PLAYBOOK = 40   # 60–120 字要求，40 是硬下限（防"更稳定更安全"这类空话）
+    need_sales = []
+    for r in intel:
+        if r.get("discard") or not r.get("notify"):
+            continue
+        t = r.get("type") or ""
+        if t == "技术战报":
+            val = (r.get("sales_playbook") or "").strip()
+            if len(val) < _MIN_PLAYBOOK:
+                need_sales.append((r.get("change_id"), "sales_playbook", len(val)))
+        elif t == "战略风向":
+            val = (r.get("sales_strategy") or "").strip()
+            if len(val) < _MIN_PLAYBOOK:
+                need_sales.append((r.get("change_id"), "sales_strategy", len(val)))
+    if need_sales:
+        sys.stderr.write(
+            "[sales] 以下 notify=true 情报缺销售指引或过于空泛（技术战报必填 sales_playbook、"
+            "战略风向必填 sales_strategy，至少 %d 字且必须落到具体能力/行业/方案，"
+            "不许写「更稳定更安全」这类空话；范例见 references/intel-criteria.md §五）:\n  %s\n"
+            % (_MIN_PLAYBOOK, "\n  ".join(
+                "%s 缺 %s（现 %d 字）" % (cid, field, n) for cid, field, n in need_sales)))
         raise SystemExit(2)
     # 语义护栏：**本轮窗口内**的条目不允许裸骨架（无 title 且非弃权/墓碑）——
     # 窗口条目必须得到完整判定，裸骨架 = 组装脚本丢失正文/理由（2026-10-27 实测：
@@ -707,8 +1493,11 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
     notify_cfg = load_notify(ws)
 
     # 2) 情报流水（intel + discard 分流落盘；按 change_id 幂等——修复后重跑不产生重复记录）
-    seen_intel = {r.get("change_id") for r in
-                  core.read_jsonl(os.path.join(ws, "log", "intel.jsonl"))}
+    existing_intel = core.read_jsonl(os.path.join(ws, "log", "intel.jsonl"))
+    seen_intel = {r.get("change_id") for r in existing_intel}
+    # 已落盘记录的 logged_at 索引：下面「已存在记录重判」分支要取原始落盘时间，
+    # 一次建好索引避免在循环里反复全量读文件（O(n²)：实测单次 3.7ms × 记录数）。
+    existing_logged_at = {r.get("change_id"): r.get("logged_at") for r in existing_intel}
     seen_discard = {r.get("change_id") for r in
                     core.read_jsonl(os.path.join(ws, "log", "discarded.jsonl"))}
     notified_intel = []
@@ -722,6 +1511,15 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
                                "logged_at": now})
             continue
         if r.get("change_id") in seen_intel:
+            # 已落盘记录的重判（复用历史判定 / --already-sent 重跑 / 上轮落盘未发）：
+            # 必须按本次判定的 notify 状态同步磁盘，否则会出现两种漏发——
+            # ① 上轮 notify=true 但未发出，本轮仍为 true 却被 `seen_intel` 提前
+            #    continue，永远进不了 notified_intel → 卡里没有它（实测漏发）；
+            # ② 已发过的记录（sent-guard 已压 notify=false）不更新则永久留 true。
+            if r.get("notify"):
+                rec = {k: r.get(k) for k in INTEL_KEYS if k in r and not k.startswith("_")}
+                rec["logged_at"] = existing_logged_at.get(r.get("change_id")) or now
+                notified_intel.append(rec)
             continue
         seen_intel.add(r.get("change_id"))
         rec = {k: r.get(k) for k in INTEL_KEYS if k in r and not k.startswith("_")}
@@ -761,9 +1559,20 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
     existing_keys = {l.get("dedupe_key") for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))}
     threshold = match_mod.threshold(rules)
     notify_p1 = bool((rules.get("scoring") or {}).get("notify_p1", False))
+    # 绝对负向黑名单（2026-10-27 用户明令）：命中即硬丢弃——不落 leads.jsonl、
+    # 不进池、不上报。用户口径：推超级巨头/成熟服务商/晚期融资 = 纯噪音，
+    # 比漏报更伤信任。这是一道**独立于规则引擎的拦截**（在黑名单面前不看得分）。
+    deny = match_mod.load_denylist(ws)
+    denied = []
     for eid in sorted(touched):
         fact = facts_mod.load_fact(ws, eid)
         if not fact:
+            continue
+        hit, why = match_mod.check_denylist(fact, deny)
+        if hit:
+            denied.append({"entity_id": eid,
+                           "entity_name": fact.get("name") or eid,
+                           "reason": why})
             continue
         result = match_mod.evaluate_entity(fact, rules)
         if not result["matched_groups"]:
@@ -803,6 +1612,10 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
             new_leads.append(lead)
 
     save_leads_latest(ws, new_leads, now, touched)
+    if denied:
+        sys.stderr.write("[denylist] %d 家企业命中黑名单，已硬丢弃（不建联、不入池）:\n  %s\n"
+                         % (len(denied), "\n  ".join(
+                             "%s — %s" % (d["entity_name"], d["reason"]) for d in denied)))
 
     # 5) 产卡（脚本产卡、直接发送；群卡仅高分/高优时出现）
     view_url = (notify_cfg.get("bitable") or {}).get("view_url")
@@ -860,7 +1673,12 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
     print("判定落盘完成：情报 %d 条（通知 %d）、事实 %d 条、新线索 %d 条、待判遗留 %d"
           % (len([r for r in intel if not r.get("discard")]), len(notified_intel),
              len(fact_records), len(new_leads), kept))
-    for p in cards:
+    # 重复内容兜底（v0.6.7，用户实测反馈）：同一事件多家报道该合并成一条，
+    # 契约早就写了但执行靠人记。这里落盘后把候选挑出来提示，**不删不改不阻断**。
+    warn_boilerplate([r for r in intel if r.get("notify")])
+    warn_duplicates([r for r in intel if r.get("notify")], ws)
+    # write_card 超限时会返回列表（自动分片）：展开后逐张打印，序号即发送顺序
+    for p in _flatten(cards):
         print("卡片: %s" % p)
     return 0
 
@@ -921,9 +1739,12 @@ def stamp():
 
 
 def cmd_lead_card(ws):
-    """猎隼池写入后重产最近一轮线索卡（私信卡 + 群卡）。
+    """重产最近一轮线索卡（私信卡 + 群卡 JSON 文件）。
 
-    运行序：judge.py --input → --bitable --commit → --lead-card（发送这版）。
+    产出**文件**，不负责发送：什么时候跑、跑完发不发由 SKILL.md「发送纪律」决定
+    ——线索卡属展示类，**默认不发**，仅用户明确要"看线索"时才跑本命令并发送。
+
+    运行序：judge.py --input → --bitable --commit →（用户要求时）--lead-card。
     必须在 commit 之后跑：此时 bitable_status 已回写，exists（此前已入池）的线索
     在卡上中性标注「已存在」、绝不进群 @——群卡只催全新 P0 建联，重复轰炸=骚扰。
     群卡也由本命令产出（--input 阶段的群卡是写入前快照，以本命令的最新版为准）。
@@ -980,15 +1801,18 @@ def cmd_lead_card(ws):
                            tags=[("%d 条 P0 线索，请尽快跟进" % len(p0_leads), "red")])
         gpath = write_card(ws, "card-leads-%s-group.json" % stamp(), gcard)
     located = sum(1 for l in leads if l.get("bitable_record_id"))
+    parts = _flatten([path])
     print("线索卡已重产: %s（%d 条中 %d 条带记录级定位；全新 %d 条、已存在标注 %d 条%s）"
-          % (path, len(leads), located, len(fresh), len(exists_leads),
-             ("；群卡: %s" % gpath) if gpath else "；无全新 P0，本轮不产群卡"))
+          % ("、".join(parts), len(leads), located, len(fresh), len(exists_leads),
+             ("；群卡: %s" % "、".join(_flatten([gpath]))) if gpath else "；无全新 P0，本轮不产群卡"))
+    if len(parts) > 1:
+        print("[注意] 线索卡已分片为 %d 张（超出飞书 30KB 限制），发送时必须全部发出。" % len(parts))
     return 0
 
 
 # ---------- 每日摘要（delta 锚点式，沿用 change-watch 的宁重勿漏） ----------
 
-def cmd_digest(ws, commit=False):
+def cmd_digest(ws, commit=False, hero_image=None):
     now = core.now_iso()
     anchor_rec = core.jload(os.path.join(ws, "state", "digest_anchor.json"), {"anchor": None})
     anchor = anchor_rec.get("anchor")
@@ -1003,19 +1827,42 @@ def cmd_digest(ws, commit=False):
     # 连用陷阱代码化（2026-10-27 实测坑）：旧实现 --commit 分支提前 return，
     # 导致 --digest --commit 连用只推进锚点、摘要卡从未产出，且无任何提示——
     # 修复为「先产卡、后推进锚点」，连用语义变为产卡+推锚一步完成。
+    #
+    # v0.6.6 补：`--commit` **不该重新产卡**。标准流程是「--digest 产卡 → 发送 → --commit 推锚」，
+    # commit 时若再产一套新卡，会在 out/ 留下**一批没人发过的重复卡片**：
+    #   ① 冗余占用（实测一次多出 2 张 40KB 卡片）；
+    #   ② 误发风险——运维看到目录里有两批卡，分不清哪批是已发的那批。
+    # 故 commit 时若存在待发送清单（说明本批卡已产出、可能已发出），直接复用其卡片路径，
+    # 只推锚不重产；清单缺失（说明是「一步到位」用法）才按老行为连产带推。
+    batch_prev = core.jload(os.path.join(ws, "state", "digest_pending_send.json"), None)
+    reuse = bool(commit and batch_prev and (batch_prev.get("cards") or []))
     by_type = {}
     for r in records:
         by_type[r.get("type") or "未分类"] = by_type.get(r.get("type") or "未分类", 0) + 1
     # 正式版式：需求文档三段式内参卡；三段全空或渲染异常时降级 simple 版式（宁重勿漏）
     path = None
     view_url = ((load_notify(ws).get("bitable") or {}).get("view_url")) or LEAD_POOL_VIEW_URL
-    try:
-        card = briefing_card(records, leads, view_url=view_url)
-        if card is not None:
-            path = write_card(ws, "card-daily-%s.json" % stamp(), card)
-    except Exception as exc:  # noqa: BLE001
-        sys.stderr.write("[fallback] 内参卡渲染失败，降级 simple 版式: %s\n" % exc)
-    if path is None:
+    if reuse:
+        # 复用已产出（且大概率已发出）的那批卡片，只推锚不重产——见上方 commit 复用说明
+        paths = [p for p in (batch_prev.get("cards") or []) if os.path.exists(p)]
+        missing = len(batch_prev.get("cards") or []) - len(paths)
+        if missing:
+            sys.stderr.write("[digest][warn] 待发送清单里 %d 张卡片已不存在（被清理？），"
+                             "推锚前请确认这批内容确实已发出\n" % missing)
+        print("复用待发送清单中的卡片（不重产）: %s" % "、".join(os.path.basename(p) for p in paths))
+    else:
+        try:
+            banner_key = resolve_banner_key(ws, hero_image)
+            if banner_key:
+                print("内参头图: 自定义 %s" % banner_key)
+            card = briefing_card(records, leads, view_url=view_url, banner_key=banner_key)
+            if card is not None:
+                path = write_card(ws, "card-daily-%s.json" % stamp(), card)
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write("[fallback] 内参卡渲染失败，降级 simple 版式: %s\n" % exc)
+        paths = _flatten([path])
+
+    if not paths:
         if not records and not leads:
             # 全空不产空卡（与 SKILL.md 纪律一致）：briefing 版式三段全空返回
             # None 后，simple 降级分支也不得产出"0 条动态"占位卡
@@ -1027,7 +1874,11 @@ def cmd_digest(ws, commit=False):
         blocks = [_block(["**本时段市场情报 %d 条**，新线索 %d 条" % (len(records), len(leads)),
                           "、".join("%s %d" % (k, v) for k, v in sorted(by_type.items(), key=lambda x: -x[1])) or "无"],
                          color="violet")]
-        blocks += intel_blocks(sorted(records, key=lambda r: SIG_ORDER.get(r.get("significance"), 3))[:4])[0]
+        # v0.6.5 修：此处旧实现 `[:4]` 预截断，再交给 intel_blocks —— 双保险失效。
+        # simple 是**降级兜底**路径（briefing 渲染异常时才走），此时更不能丢内容：
+        # 锚点随后即推进，被截掉的 notify=true 情报永久消失。交给 intel_blocks
+        # 自己做 notify 豁免（该函数已改为 notify=true 全展示）。
+        blocks += intel_blocks(records)[0]
         blocks.append({"tag": "markdown",
                        "content": "<font color='grey'>窗口起点：%s</font>" % (anchor or "首次运行"),
                        "text_size": "notation"})
@@ -1035,19 +1886,75 @@ def cmd_digest(ws, commit=False):
                           template="violet",
                           tags=[("%d 条动态" % len(records), "violet"), ("%d 条新线索" % len(leads), "green")],
                           icon={**INTEL_ICON, "color": "violet"})
-        path = write_card(ws, "card-digest-%s.json" % stamp(), card)
-    print("摘要卡已产出: %s" % path)
+        paths = _flatten([write_card(ws, "card-digest-%s.json" % stamp(), card)])
+    print("摘要卡已产出: %s" % "、".join(os.path.basename(str(p)) for p in paths))
+    if len(paths) > 1:
+        # 分片必须全发：只发第一片等于丢掉后面所有情报（比超限报错更隐蔽）
+        print("[注意] 摘要卡已分片为 %d 张（超出飞书 30KB 限制），**必须按顺序全部发送**；"
+              "漏发任何一片，该片内容在锚点推进后即永久丢失。" % len(paths))
+    # v0.6.6：**产卡时落待发送清单**。它的作用是给「发送 → 核对 → 推锚」这个三步链条
+    # 留一份可核对凭证：发送失败时能凭它知道该重发哪些卡、覆盖哪些记录。
+    # 旧实现只在 commit 分支推进锚点、不留凭据，一旦发送失败（如卡片超限被拒收），
+    # 内容已被标「已通报」→ 永久丢失且无从追溯。
+    # 注意：commit 且复用清单时**不要覆盖清单**（records 此刻已含本批，覆盖会污染覆盖范围）。
+    batch = os.path.join(ws, "state", "digest_pending_send.json")
+    if not reuse:
+        core.jdump(batch, {"created_at": now, "anchor_before": anchor,
+                           "cards": list(paths), "card_count": len(paths),
+                           "record_ids": [r.get("change_id") for r in records],
+                           "lead_ids": [l.get("lead_id") for l in leads],
+                           "committed": False})
     if commit:
         # 锚点必须同时覆盖情报与线索的 logged_at：只看 intel 会把更晚落盘的线索
         # 留在窗口里，下期日报重复展示已发过的线索（宁重勿漏只对情报成立，线索有去重键）。
         new_anchor = _advance_anchor(ws, anchor, now)
         print("摘要锚点已推进到: %s" % new_anchor)
+        print("[注意] 锚点已推进且本批记录已标记为「已通报」——若这张卡后续发送失败，"
+              "这批内容不会再次出现在下期内参里（防重发优先于防漏发）。"
+              "因此**正确顺序是：先 --digest 产卡 → 发送成功 → 再 --digest --commit**；"
+              "只有确认卡已送达时才可连用。")
+        try:
+            os.remove(batch)  # 已发送并推锚：凭据完成使命
+        except OSError:
+            pass
     else:
-        print("（发送成功后请跑 --digest --commit 推进锚点）")
+        print("待发送清单已落盘: %s（共 %d 张，发送成功后跑 --digest --commit）"
+              % (batch, len(paths)))
     return 0
 
 
-def _advance_anchor(ws, anchor, now):
+def _advance_anchor(ws, anchor, now, mark_sent=True):
+    """推进摘要锚点；mark_sent=True 时顺带给窗口内 notify 记录补"已通报"标记。
+
+    2026-10-27 实测缺口：锚点推进意味着这批内容已随内参卡发出，但旧实现只改
+    anchor、不打 suppressed_by_guard，于是这些记录永远留着 notify=true 且无标记。
+    平时无害（锚点之后才会进窗口），但**一旦锚点被重置/回滚，它们会以旧闻身份
+    重新推送到内参卡**。已发卡不可能是"未发"，故在推进锚点的同一动作里补标，
+    让"锚点覆盖"与"已通报契约"永远一致，不依赖人工记得传 --already-sent。
+    """
+    if mark_sent:
+        path = os.path.join(ws, "log", "intel.jsonl")
+        rows = core.read_jsonl(path)
+        anchor_ts = core.parse_iso(anchor) or 0
+        now_ts = core.parse_iso(now) or 0
+        changed = False
+        for r in rows:
+            if r.get("discard") or r.get("suppressed_by_guard"):
+                continue
+            ts = core.parse_iso(r.get("logged_at")) or 0
+            # 用 >= 而非 >：锚点本身是「已覆盖到的时刻」，落在锚点上的记录
+            # 同样属于本期已发（2026-10-27 实测：6 条记录的 logged_at 恰好
+            # 等于锚点，用 > 永远补不上，留下 notify=true 的旧闻重推隐患）。
+            if ts and ts >= anchor_ts and ts <= now_ts:
+                # 窗口内（旧锚点及之后、本次推进之前）的记录：已随本期内参发出
+                r["suppressed_by_guard"] = True
+                if r.get("notify"):
+                    r["notify"] = False
+                changed = True
+        if changed:
+            with open(path, "w", encoding="utf-8") as f:
+                for r in rows:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
     # 锚点推进逻辑抽出复用（intel + leads 双覆盖）
     stamps = [r.get("logged_at") for r in core.read_jsonl(os.path.join(ws, "log", "intel.jsonl"))] \
         + [l.get("logged_at") for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))]
@@ -1076,7 +1983,7 @@ def cmd_status(ws):
                       template="yellow" if (down or stale) else "green",
                       tags=[("正常", "green") if not (down or stale) else ("有异常", "yellow")])
     path = write_card(ws, "card-status-%s.json" % stamp(), card)
-    print("状态卡已产出: %s" % path)
+    print("状态卡已产出: %s" % "、".join(str(p) for p in _flatten([path])))
     return 0
 
 
@@ -1093,6 +2000,11 @@ def main():
                     help="沙箱预检：临时副本上完整演练 --input 流程并报告问题，真实工作区零写入")
     ap.add_argument("--digest", action="store_true", help="产出每日摘要卡（delta 窗口）")
     ap.add_argument("--commit", action="store_true", help="与 --digest 连用：推进摘要锚点")
+    ap.add_argument("--hero-image",
+                    help="内参自定义头图：本地图片路径（自动上传飞书换 image_key 并按文件"
+                         "指纹缓存，≤10M、高:宽 ≤16:9）或现成 img_v3 key；"
+                         "未传时用 notify.json 的 notify.hero_image，再退回内置默认图。"
+                         "替换后先私信预览确认再发群（发送纪律）")
     ap.add_argument("--status-card", action="store_true", help="产出扫描状态简报卡")
     ap.add_argument("--research-check", action="store_true",
                     help="调研完整度审计：逐企业核对 14 必研字段，未达标退出码 2")
@@ -1135,7 +2047,7 @@ def main():
         print("预览已写入 %s（共 %d 条）。确认无误后加 --commit 真正写入。" % (bitable.pending_path(ws), len(items)))
         raise SystemExit(0)
     if args.digest:
-        raise SystemExit(cmd_digest(ws, commit=args.commit))
+        raise SystemExit(cmd_digest(ws, commit=args.commit, hero_image=args.hero_image))
     if args.status_card:
         raise SystemExit(cmd_status(ws))
     if args.input:
