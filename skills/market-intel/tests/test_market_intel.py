@@ -1036,6 +1036,19 @@ class TestBitable(unittest.TestCase):
         self.assertIsNone(f(""))
         self.assertIsNone(f("C3轮不准的", {"B轮"}))  # 不在选项则拒绝
 
+    def test_norm_round_empty_set_means_unconstrained(self):
+        """空集 = 离线构建无选项约束，不得当成零选项全拒（v0.6.14 修，陷阱 69）。
+
+        2026-10-27 实测：`--bitable` 预览时 opt() 返回空 set，
+        旧实现 `options is not None` 判定有约束 → 任何轮次返回 None
+        → 融资动态字段静默消失。
+        """
+        f = self.bitable.norm_round
+        self.assertEqual(f("Pre-A轮", set()), "Pre-A轮", "空集应视为无约束")
+        self.assertEqual(f("天使轮", set()), "天使轮")
+        # 真约束仍然生效
+        self.assertIsNone(f("Pre-A轮", {"天使轮"}))
+
     def test_map_tags_regions(self):
         tags = self.bitable.map_tags(
             ["游戏", "互联网"], "TikTok 在美国的下载量暴涨", self.cfg["maps"]["industry_to_tags"],
@@ -3327,6 +3340,43 @@ class TestNoBoilerplateSummary(unittest.TestCase):
         """notify=false 的归档条目不检查（它们本就不上卡）。"""
         recs = [{"change_id": "x4", "notify": False, "title": "T", "summary": "短"}]
         self.assertEqual(judge.warn_boilerplate(recs), 0)
+
+    def test_activity_short_highlight_flagged(self):
+        """notify=true 活动看点 <45 字必须告警（v0.6.14 加，陷阱 68）。
+
+        2026-10-27 实测：同批活动 10-26 判定 60~76 字，10-27 重判缩水
+        30~38 字套话，无任何告警——数据层降级，渲染层无压缩。
+        """
+        recs = [{"change_id": "a1", "notify": True, "type": "活动情报",
+                 "title": "AI文娱大会",
+                 "activity": {"name": "AI文娱大会", "time": "详见报名页",
+                              "location": "详见报名页",
+                              "highlight": "展区是接触短剧出海工具链供应商的场所，可作为生态伙伴拓展场景。"}}]
+        self.assertGreaterEqual(judge.warn_activity_highlights(recs), 1, "31字套话看点应告警")
+
+    def test_activity_rich_highlight_passes(self):
+        """昨日水准的富文本看点（≥45字，含细节与行动建议）不该误报。"""
+        recs = [{"change_id": "a2", "notify": True, "type": "活动情报",
+                 "title": "南山云启·出海：生命健康专场",
+                 "activity": {"name": "南山云启·出海：生命健康专场", "time": "详见报名页",
+                              "location": "详见报名页",
+                              "highlight": "「全球准入」直接对应跨境合规与数据驻留需求，"
+                                           "是医疗健康出海客户的高价值场景，"
+                                           "建议重点跟进参会企业的海外数据合规诉求。"}}]
+        self.assertEqual(judge.warn_activity_highlights(recs), 0, "58字富文本看点不该告警")
+
+    def test_activity_missing_highlight_flagged(self):
+        """notify=true 活动缺 highlight 明细也属于看点缺失，要告警。"""
+        recs = [{"change_id": "a3", "notify": True, "type": "活动情报",
+                 "title": "某大会", "activity": {"name": "某大会", "time": "x", "location": "y"}}]
+        self.assertGreaterEqual(judge.warn_activity_highlights(recs), 1)
+
+    def test_activity_archive_entries_ignored(self):
+        """notify=false 活动不检查看点长度（归档语义不上卡）。"""
+        recs = [{"change_id": "a4", "notify": False, "type": "活动情报",
+                 "title": "某归档活动", "activity": {"name": "x", "time": "t", "location": "l",
+                                                     "highlight": "短"}}]
+        self.assertEqual(judge.warn_activity_highlights(recs), 0)
 
 
 class TestSourceNameNoSuffix(unittest.TestCase):

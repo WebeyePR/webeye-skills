@@ -126,7 +126,10 @@ def norm_round(text, options=None):
     # 大小写规整：Pre-A轮 / A+轮 / B轮
     t = re.sub(r"PRE-([ABCD])", lambda m: "Pre-" + m.group(1), t, flags=re.IGNORECASE)
     t = re.sub(r"^([ABCD])\+", lambda m: m.group(1) + "+", t)
-    if options is not None and t not in options:
+    # 空集 = 离线构建阶段无选项约束（与 map_tags 同口径），不得当成"零选项全拒"：
+    # 2026-10-27 实测：--bitable 预览时 opt() 返回空 set，`is not None` 判定为
+    # 有约束，任何轮次都撞 `not in set()` 返回 None → 融资动态字段静默丢失。
+    if options and t not in options:
         return None
     return t
 

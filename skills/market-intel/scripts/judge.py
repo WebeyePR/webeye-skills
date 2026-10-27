@@ -416,6 +416,43 @@ def warn_boilerplate(intel):
     return len(suspicious)
 
 
+def warn_activity_highlights(intel, min_len=45):
+    """检测「活动看点偷懒」：notify=true 的活动 highlight 过短或空泛。
+
+    为什么要在代码里拦（2026-10-27 实测）：同批活动 10-26 判定时的看点 60~76 字
+    （含括号细节与行动建议，如「短剧出海工具链（生成、译制、分发）供应商」），
+    10-27 洁净重置复判时缩水到 30~38 字套话（如「可作为生态伙伴拓展场景」）——
+    详情页数据没变，是判定偷懒。活动看点是市场同事决定「去不去这个活动」的
+    直接依据，套话等于没写。与 warn_boilerplate 同纪律：只告警不阻断，
+    但把缺口写进 stderr 让判定侧必须回应。
+
+    口径：notify=true 且带 activity 明细的记录，highlight 缺失或 < min_len
+    （默认 45 字，与 10-26 良性判定 40~76 字的下沿对齐）即告警。
+    notify=false 归档条目不检查。
+    """
+    suspicious = []
+    for r in intel:
+        if r.get("discard") or not r.get("notify"):
+            continue
+        a = r.get("activity") or {}
+        hl = (a.get("highlight") or "").strip()
+        if not hl or len(hl) < min_len:
+            suspicious.append((r, len(hl)))
+    if not suspicious:
+        return 0
+    sys.stderr.write(
+        "\n[activity-highlight] %d 条 notify=true 活动看点过短（<%d字）或缺失——"
+        "看点是市场同事决定去不去的直接依据，套话等于没写。\n"
+        "   必须写「面向谁、讲什么、为什么值得去、建议动作」，详情页可查的"
+        "报名规模/主题细节应带上（参照 activities-criteria.md 的契约）。\n" % (len(suspicious), min_len))
+    for r, n in suspicious[:10]:
+        a = r.get("activity") or {}
+        sys.stderr.write("   · [%s] %s\n     当前看点(%d字): %s\n"
+                         % (r.get("change_id"), (a.get("name") or r.get("title") or "")[:44],
+                            n, (a.get("highlight") or "(缺失)")[:70]))
+    return len(suspicious)
+
+
 def warn_duplicates(intel, ws=None):
     """落盘后提示疑似重复，写 stderr（不阻断落盘、不删记录）。
 
@@ -1690,6 +1727,7 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
     # 重复内容兜底（v0.6.7，用户实测反馈）：同一事件多家报道该合并成一条，
     # 契约早就写了但执行靠人记。这里落盘后把候选挑出来提示，**不删不改不阻断**。
     warn_boilerplate([r for r in intel if r.get("notify")])
+    warn_activity_highlights(intel)
     warn_duplicates([r for r in intel if r.get("notify")], ws)
     # write_card 超限时会返回列表（自动分片）：展开后逐张打印，序号即发送顺序
     for p in _flatten(cards):
