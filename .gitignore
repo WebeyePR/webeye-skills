@@ -210,3 +210,5 @@ __marimo__/
 .serena/
 
 .DS_Store
+# Agent 工作区本地数据（项目记忆等，不入库；注意不是缓存，勿删除）
+.workbuddy/
