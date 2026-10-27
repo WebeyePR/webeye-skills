@@ -381,19 +381,26 @@ def _extract_new_rid(d):
 
 def _search_company(name, cfg):
     """按公司名称检索是否已有记录（精确匹配校验，忽略大小写）。返回 record_id 或 None。"""
-    d = _cli(["+record-search", "--keyword", name, "--search-field", "公司名称",
-              "--field-id", "公司名称", "--limit", "20", "--format", "json"], cfg)
-    if not d.get("ok"):
-        return None
-    data = (d.get("data") or {})
-    rows = data.get("data") or []
-    rids = data.get("record_id_list") or []
-    for row, rid in zip(rows, rids):
-        # 行是投影字段值数组（公司名称在首位）；精确相等（忽略大小写）才认定已存在
-        cells = row if isinstance(row, list) else [row]
-        if cells and str(cells[0]).strip().lower() == str(name).strip().lower() and rid:
-            return rid
-    return None
+    # 使用已安装 CLI 的 offset 分页；预算耗尽不能当成查无此公司。
+    for offset in range(0, 2000, 20):
+        d = _cli(["+record-search", "--keyword", name, "--search-field", "公司名称",
+                  "--field-id", "公司名称", "--limit", "20", "--offset", str(offset),
+                  "--format", "json"], cfg)
+        if not d.get("ok"):
+            raise RuntimeError("公司查重失败，停止本条创建")
+        data = d.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("data"), list) or not isinstance(data.get("record_id_list"), list):
+            raise RuntimeError("公司查重响应结构不完整，停止本条创建")
+        rows, rids = data["data"], data["record_id_list"]
+        if len(rows) != len(rids):
+            raise RuntimeError("公司查重行数与记录 ID 数不一致")
+        for row, rid in zip(rows, rids):
+            cells = row if isinstance(row, list) else [row]
+            if cells and str(cells[0]).strip().lower() == str(name).strip().lower() and rid:
+                return rid
+        if len(rows) < 20:
+            return None
+    raise RuntimeError("公司查重超过分页预算，停止本条创建")
 
 
 def _dedupe_candidates(item):
@@ -484,11 +491,19 @@ def commit(ws, cfg, yes=False):
             continue
         # 写入前去重：公司名 + 别名候选逐个精确检索，任一命中即已存在（不重复建行）
         rid, hit_name = None, None
-        for cand in _dedupe_candidates(it):
-            rid = _search_company(cand, cfg)
-            if rid:
-                hit_name = cand
-                break
+        try:
+            for cand in _dedupe_candidates(it):
+                rid = _search_company(cand, cfg)
+                if rid:
+                    hit_name = cand
+                    break
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            failed += 1
+            updates[it["lead_id"]] = {"bitable_status": "failed", "bitable_error": str(exc)}
+            logs.append({"lead_id": it["lead_id"], "company": name, "result": "failed",
+                         "error": str(exc), "at": core.now_iso()})
+            sys.stderr.write("[bitable] %s：%s；未创建，保留重试\n" % (name, exc))
+            continue
         if rid:
             exists += 1
             updates[it["lead_id"]] = {"bitable_status": "exists", "bitable_record_id": rid}
@@ -504,7 +519,11 @@ def commit(ws, cfg, yes=False):
             new_rid = _extract_new_rid(d)
             if not new_rid:
                 # 防御：个别响应结构解析不到 record_id，用检索兜底，保证「查看线索」定位链不断
-                new_rid = _search_company(name, cfg)
+                try:
+                    new_rid = _search_company(name, cfg)
+                except (RuntimeError, OSError, subprocess.SubprocessError):
+                    # 创建已成功，查 ID 失败不得把它改为可重试创建。
+                    new_rid = None
                 if new_rid:
                     sys.stderr.write("[bitable] %s 写入成功但响应未含 record_id，检索兜底到 %s\n"
                                      % (name, new_rid))

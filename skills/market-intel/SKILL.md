@@ -9,7 +9,7 @@ description: >-
   榜单监控/潜在客户与业务情报，indigo 头图；榜单段有数据才出现），确认线索对接「猎隼线索池」多维表格（预设待权限校准）。适用于："最近八行业
   有什么动态"、"帮我盯种子到B轮刚融资的出海公司"、"这类线索定时推给我"。触发举例："市场情报简报"、
   "发现了哪些潜在客户"、"把某公司加入监控"。
-version: 0.6.9
+version: 0.6.10
 author: Webeye CSBU Team
 license: MIT
 alwaysActive: false
@@ -67,6 +67,11 @@ AIHOT 的词表与 tier 概念。**字段与结构能继承的一律继承，不
 | `log/leads.jsonl` | 线索流水（字段与多维表格预设一一对应） |
 | `log/discarded.jsonl` / `unjudged.jsonl` / `rolled_out.jsonl` / `runs.jsonl` | 丢弃留痕 / 超时未判 / 窗口滚动 / 每轮小结 |
 
+## 可靠性修复计划
+
+逐项方案、验收和边界见 `references/reliability-plan.md`。重判更新有效流水并将旧值保留在
+`log/intel-revisions.jsonl`；已通报记录的文案更正不触发重发。
+
 ## 工作流
 
 ### 用户触发的标准流程（"跑一下"、"看看有什么新东西" → 按此执行，唯一入口）
@@ -76,7 +81,7 @@ AIHOT 的词表与 tier 概念。**字段与结构能继承的一律继承，不
 
 1. **采集**：`pipeline.py --run`。退出码 1=配置错（明确报告，不静默）；2=有源失败
    （继续，但要在最终汇报里点名）；3=锁冲突（本轮跳过，不重试）。
-2. **判空**：读 `out/latest.json` 的 `summary.total`。`total==0` 且无失败 →
+2. **判空**：读 `out/latest.json` 的 `summary.needs_judgment`（旧版用 `len(changes)`）。待判为 0 且无失败 →
    回报"本轮无新增"，**不发卡**（无增量不发卡，也不发空卡占位）。
 3. **判断**：按 `references/intel-criteria.md` + `lead-criteria.md` 对每条 change 给结论
    （弃权也要写 `discard: true` + 理由）；有融资/招聘等事实的抽 facts。
@@ -147,8 +152,8 @@ python3 <技能目录>/scripts/pipeline.py --baseline
 python3 <技能目录>/scripts/pipeline.py --run     # 退出码: 0 正常 / 1 配置错 / 2 有源失败 / 3 锁冲突
 ```
 
-产出 `out/latest.json`。`summary.total == 0` 且无失败/停更 → 本轮干净，结束；
-`total > 0` → 进入第 3 步。失败与停更已由脚本维护（`summary.sources_down` / `stale_sources`），不用你算。
+产出 `out/latest.json`。`summary.needs_judgment == 0` 且无失败/停更 → 本轮干净，结束；
+待判数量大于 0（包括 `pending_carried`）→ 进入第 3 步。失败与停更已由脚本维护（`summary.sources_down` / `stale_sources`），不用你算。
 
 ### 第 3 步：AI 判断（你来做）
 

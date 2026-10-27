@@ -1493,52 +1493,48 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
     notify_cfg = load_notify(ws)
 
     # 2) 情报流水（intel + discard 分流落盘；按 change_id 幂等——修复后重跑不产生重复记录）
-    existing_intel = core.read_jsonl(os.path.join(ws, "log", "intel.jsonl"))
-    seen_intel = {r.get("change_id") for r in existing_intel}
-    # 已落盘记录的 logged_at 索引：下面「已存在记录重判」分支要取原始落盘时间，
-    # 一次建好索引避免在循环里反复全量读文件（O(n²)：实测单次 3.7ms × 记录数）。
-    existing_logged_at = {r.get("change_id"): r.get("logged_at") for r in existing_intel}
-    seen_discard = {r.get("change_id") for r in
-                    core.read_jsonl(os.path.join(ws, "log", "discarded.jsonl"))}
+    intel_path = os.path.join(ws, "log", "intel.jsonl")
+    discard_path = os.path.join(ws, "log", "discarded.jsonl")
+    existing_intel = core.read_jsonl(intel_path)
+    active = {r.get("change_id"): r for r in existing_intel}
+    discarded = {r.get("change_id"): r for r in core.read_jsonl(discard_path)}
     notified_intel = []
     for r in intel:
+        cid = r.get("change_id")
+        previous = active.get(cid)
         if r.get("discard"):
-            if r.get("change_id") in seen_discard:
-                continue
-            seen_discard.add(r.get("change_id"))
-            core.append_jsonl(os.path.join(ws, "log", "discarded.jsonl"),
-                              {"change_id": r.get("change_id"), "reason": r.get("discard_reason") or "未说明",
-                               "logged_at": now})
+            if previous:
+                # 撤回只移出有效流水，原判定仍留在修订日志中。
+                core.append_jsonl(os.path.join(ws, "log", "intel-revisions.jsonl"),
+                                  {"change_id": cid, "previous": previous, "action": "discard", "at": now})
+                del active[cid]
+            discarded[cid] = {"change_id": cid, "reason": r.get("discard_reason") or "未说明",
+                              "logged_at": discarded.get(cid, {}).get("logged_at") or now}
             continue
-        if r.get("change_id") in seen_intel:
-            # 已落盘记录的重判（复用历史判定 / --already-sent 重跑 / 上轮落盘未发）：
-            # 必须按本次判定的 notify 状态同步磁盘，否则会出现两种漏发——
-            # ① 上轮 notify=true 但未发出，本轮仍为 true 却被 `seen_intel` 提前
-            #    continue，永远进不了 notified_intel → 卡里没有它（实测漏发）；
-            # ② 已发过的记录（sent-guard 已压 notify=false）不更新则永久留 true。
-            if r.get("notify"):
-                rec = {k: r.get(k) for k in INTEL_KEYS if k in r and not k.startswith("_")}
-                rec["logged_at"] = existing_logged_at.get(r.get("change_id")) or now
-                notified_intel.append(rec)
-            continue
-        seen_intel.add(r.get("change_id"))
         rec = {k: r.get(k) for k in INTEL_KEYS if k in r and not k.startswith("_")}
-        rec["logged_at"] = now
-        ch = changes_by_id.get(r.get("change_id"))
-        nums, grounded_notes = grounding_check(r, ch)
+        rec["logged_at"] = (previous or {}).get("logged_at") or now
+        nums, grounded_notes = grounding_check(r, changes_by_id.get(cid))
         if grounded_notes:
-            rec["grounding_notes"] = grounded_notes  # 换算备注留档，供人工审计
+            rec["grounding_notes"] = grounded_notes
         if nums:
             rec["grounding"] = "unverified"
-            sys.stderr.write("[grounding] change %s 的说明含原文没有的数字: %s（请回原文核实，"
-                             "若为单位/汇率换算可在 number_notes 申报）\n"
-                             % (r.get("change_id"), ",".join(nums)))
+            sys.stderr.write("[grounding] change %s 的说明含原文没有的数字: %s（请回原文核实）\n"
+                             % (cid, ",".join(nums)))
         rec.setdefault("significance", "unknown")
-        if rec["significance"] == "unknown":
-            rec["notify"] = False  # 没判断过的东西不许发（脚本强制）
-        core.append_jsonl(os.path.join(ws, "log", "intel.jsonl"), rec)
+        # 修正文案不等于重新发送；既有发送保护优先于 AI 新申报。
+        if (previous or {}).get("suppressed_by_guard"):
+            rec["suppressed_by_guard"] = True
+        if rec["significance"] == "unknown" or rec.get("suppressed_by_guard"):
+            rec["notify"] = False
+        if previous and previous != rec:
+            core.append_jsonl(os.path.join(ws, "log", "intel-revisions.jsonl"),
+                              {"change_id": cid, "previous": previous, "action": "revise", "at": now})
+        active[cid] = rec
+        discarded.pop(cid, None)
         if rec.get("notify"):
             notified_intel.append(rec)
+    core.replace_jsonl(intel_path, active.values())
+    core.replace_jsonl(discard_path, discarded.values())
 
     # 3) 事实抽取 -> 企业档案（含 web_page 招聘信号的确定性直录）
     touched = set()

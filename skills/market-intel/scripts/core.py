@@ -156,6 +156,22 @@ def append_jsonl(path, obj):
         fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
+def replace_jsonl(path, rows):
+    """完整写入临时文件后替换，避免重判中途留下半份流水。"""
+    import tempfile
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".jsonl-", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
 def read_jsonl(path):
     if not os.path.exists(path):
         return []

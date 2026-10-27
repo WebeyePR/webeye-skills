@@ -196,6 +196,8 @@ def run_round(ws, baseline=False):
                         e = collect.enrich_detail(s, e, settings, enrich_budget)
                     cid = make_cid(s["id"], kind, e.get("key"))
                     all_changes.append(diffcore.make_change(cid, s, kind, e, now))
+            # 先保存本轮所有待判，再推进快照；任何源写盘失败均可从队列恢复。
+            diffcore.enqueue_pending(ws, all_changes, now)
             diffcore.save_snapshot(ws, s["id"], entries, now)
 
         if baseline:
@@ -206,12 +208,14 @@ def run_round(ws, baseline=False):
             return 0
 
         changes, expired = diffcore.load_and_merge_pending(ws, all_changes, now)
+        diffcore.save_pending(ws, changes, set(), now)
         core.jdump(os.path.join(ws, "state", "health.json"), health)
         stale = stale_check(sources, settings, ws, now)
         latest = {
             "run_at": now,
             "summary": {"total": len([c for c in changes if not c.get("reopened")]),
                         "pending_carried": len([c for c in changes if c.get("reopened")]),
+                        "needs_judgment": len(changes),
                         "pending_expired": expired,
                         "sources_total": len(sources),
                         "sources_down": len([1 for k, v in health.items() if v.get("status") == "down"]),

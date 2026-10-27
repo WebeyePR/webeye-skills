@@ -142,8 +142,11 @@ def load_and_merge_pending(ws, changes, now):
         core.append_jsonl(os.path.join(ws, "log", "unjudged.jsonl"),
                           {**it, "expired_at": now, "reason": "未判超过 %d 小时" % MAX_PENDING_AGE_H})
 
+    # 重试同一变化不能刷新首次发现时间，否则待判永不过期。
+    originals = {c.get("change_id"): c for c in alive}
+    merged = [{**c, "first_seen": originals[c["change_id"]].get("first_seen")}
+              if c.get("change_id") in originals else c for c in changes]
     seen = {c["change_id"] for c in changes}
-    merged = list(changes)
     for it in alive:
         if it.get("change_id") not in seen:
             merged.append({**it, "reopened": True})
@@ -154,9 +157,16 @@ def load_and_merge_pending(ws, changes, now):
 def save_pending(ws, changes, judged_ids, now):
     """核销已判、保留未判。judged_ids 为本轮已给出结论的 change_id 集合。"""
     keep = [c for c in changes if c.get("change_id") not in judged_ids]
-    slim = [{k: c.get(k) for k in ("change_id", "source_id", "source_name", "serves", "tier",
-                                   "owner_entity", "change_kind", "key", "url", "title",
-                                   "summary", "published", "first_seen")}
-            for c in keep]
-    core.jdump(pending_path(ws), {"updated_at": now, "items": slim})
+    # 保留来源类型和详情富化字段；reopened 仅为当前轮展示标记。
+    payload = [{k: v for k, v in c.items() if k != "reopened"} for c in keep]
+    core.jdump(pending_path(ws), {"updated_at": now, "items": payload})
     return len(keep)
+
+
+def enqueue_pending(ws, changes, now):
+    """快照推进前保存待判；中断重试按稳定 ID 合并且不刷新年龄。"""
+    current = core.jload(pending_path(ws), {"items": []}).get("items", [])
+    items = {c["change_id"]: c for c in current}
+    for change in changes:
+        items.setdefault(change["change_id"], change)
+    save_pending(ws, list(items.values()), set(), now)
