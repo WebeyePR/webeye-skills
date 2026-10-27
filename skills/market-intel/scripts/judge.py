@@ -1511,13 +1511,14 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
     # 2) 情报流水（intel + discard 分流落盘；按 change_id 幂等——修复后重跑不产生重复记录）
     intel_path = os.path.join(ws, "log", "intel.jsonl")
     discard_path = os.path.join(ws, "log", "discarded.jsonl")
-    existing_intel = core.read_jsonl(intel_path)
+    existing_intel = core.read_jsonl(intel_path, strict=True)
     active = {r.get("change_id"): r for r in existing_intel}
-    discarded = {r.get("change_id"): r for r in core.read_jsonl(discard_path)}
+    discarded = {r.get("change_id"): r for r in core.read_jsonl(discard_path, strict=True)}
     notified_intel = []
     for r in intel:
         cid = r.get("change_id")
         previous = active.get(cid)
+        prior_state = previous or discarded.get(cid) or {}
         if r.get("discard"):
             if previous:
                 # 撤回只移出有效流水，原判定仍留在修订日志中。
@@ -1525,10 +1526,11 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
                                   {"change_id": cid, "previous": previous, "action": "discard", "at": now})
                 del active[cid]
             discarded[cid] = {"change_id": cid, "reason": r.get("discard_reason") or "未说明",
-                              "logged_at": discarded.get(cid, {}).get("logged_at") or now}
+                              "logged_at": prior_state.get("logged_at") or now,
+                              "suppressed_by_guard": bool(prior_state.get("suppressed_by_guard"))}
             continue
         rec = {k: r.get(k) for k in INTEL_KEYS if k in r and not k.startswith("_")}
-        rec["logged_at"] = (previous or {}).get("logged_at") or now
+        rec["logged_at"] = prior_state.get("logged_at") or now
         nums, grounded_notes = grounding_check(r, changes_by_id.get(cid))
         if grounded_notes:
             rec["grounding_notes"] = grounded_notes
@@ -1538,7 +1540,7 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
                              % (cid, ",".join(nums)))
         rec.setdefault("significance", "unknown")
         # 修正文案不等于重新发送；既有发送保护优先于 AI 新申报。
-        if (previous or {}).get("suppressed_by_guard"):
+        if prior_state.get("suppressed_by_guard"):
             rec["suppressed_by_guard"] = True
         if rec["significance"] == "unknown" or rec.get("suppressed_by_guard"):
             rec["notify"] = False

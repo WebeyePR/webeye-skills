@@ -420,16 +420,14 @@ def _dedupe_candidates(item):
 def _update_leads(ws, updates):
     """回写 leads.jsonl 的 bitable_status / bitable_record_id。updates: {lead_id: {...}}"""
     path = os.path.join(ws, "log", "leads.jsonl")
-    rows = core.read_jsonl(path)
+    rows = core.read_jsonl(path, strict=True)
     out = []
     for r in rows:
         u = updates.get(r.get("lead_id"))
         if u:
             r.update(u)
         out.append(r)
-    with open(path, "w", encoding="utf-8") as f:
-        for r in out:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    core.replace_jsonl(path, out)
 
 
 def commit(ws, cfg, yes=False):

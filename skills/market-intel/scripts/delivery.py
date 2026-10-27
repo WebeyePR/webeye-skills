@@ -53,8 +53,8 @@ def confirm(ws, batch, anchor, now):
         if expected and file_hash(path) != expected:
             raise SystemExit("[digest] 分片文件已变化，重新产卡并核对后才能提交")
     intel_path = os.path.join(ws, "log", "intel.jsonl")
-    records = core.read_jsonl(intel_path)
-    leads = core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))
+    records = core.read_jsonl(intel_path, strict=True)
+    leads = core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"), strict=True)
     groups = [("record", "change_id", records), ("lead", "lead_id", leads)]
     for prefix, key, rows in groups:
         indexed = {r.get(key): r for r in rows}

@@ -64,6 +64,15 @@ class TestRecovery(WorkspaceCase):
         self.assertEqual(loaded[0]["activity"], change["activity"])
         self.assertEqual(loaded[0]["first_seen"], change["first_seen"])
 
+    def test_corrupt_queue_does_not_advance_snapshot(self):
+        old = {"key": "old"}
+        diffcore.save_snapshot(self.ws, "s", [old], core.now_iso())
+        with open(diffcore.pending_path(self.ws), "w", encoding="utf-8") as fh:
+            fh.write("{损坏队列")
+        with self.assertRaises(ValueError):
+            self.round([old, {"key": "new"}])
+        self.assertEqual(set(diffcore.load_snapshot(self.ws, "s")), {"old"})
+
 
 class TestRejudgment(WorkspaceCase):
     def write(self, summary="摘要", **extra):
@@ -99,6 +108,28 @@ class TestRejudgment(WorkspaceCase):
         rec = core.read_jsonl(self.ws + "/log/intel.jsonl")[0]
         self.assertEqual(rec["summary"], "修正文案")
         self.assertTrue(rec["suppressed_by_guard"])
+        self.assertFalse(rec["notify"])
+
+    def test_corrupt_existing_log_refuses_rewrite(self):
+        self.write()
+        path = self.ws + "/log/intel.jsonl"
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("{损坏的记录\n")
+        with open(path, encoding="utf-8") as fh:
+            before = fh.read()
+        with self.assertRaises(ValueError):
+            self.write("修正文案")
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), before, "不能悄悄丢弃损坏行后重写")
+
+    def test_sent_discarded_then_restored_never_reactivates(self):
+        self.write(suppressed_by_guard=True, notify=False)
+        core.jdump(self.ws + "/judged.json", {"intel": [
+            {"change_id": "x", "discard": True, "discard_reason": "撤回"}]})
+        judge.cmd_input(self.ws, self.ws + "/judged.json")
+        self.write("核实后恢复", notify=True)
+        rec = core.read_jsonl(self.ws + "/log/intel.jsonl")[0]
+        self.assertTrue(rec.get("suppressed_by_guard"))
         self.assertFalse(rec["notify"])
 
 

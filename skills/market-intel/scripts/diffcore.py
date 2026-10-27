@@ -128,7 +128,7 @@ def load_and_merge_pending(ws, changes, now):
 
     返回 (本轮生效的变更列表, 过期条数)。
     """
-    state = core.jload(pending_path(ws), {"items": []})
+    state = core.jload(pending_path(ws), {"items": []}, strict=True)
     items = state.get("items", [])
     alive, expired = [], []
     for it in items:
@@ -165,7 +165,7 @@ def save_pending(ws, changes, judged_ids, now):
 
 def enqueue_pending(ws, changes, now):
     """快照推进前保存待判；中断重试按稳定 ID 合并且不刷新年龄。"""
-    current = core.jload(pending_path(ws), {"items": []}).get("items", [])
+    current = core.jload(pending_path(ws), {"items": []}, strict=True).get("items", [])
     items = {c["change_id"]: c for c in current}
     for change in changes:
         items.setdefault(change["change_id"], change)

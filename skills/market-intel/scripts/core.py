@@ -130,13 +130,15 @@ def fetch(url, timeout=30, retries=1):
 
 # ---------- JSON 落盘（原子写） ----------
 
-def jload(path, default):
+def jload(path, default, strict=False):
     try:
         with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
     except FileNotFoundError:
         return default
     except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise ValueError("状态文件读取失败，拒绝覆盖: %s" % path) from exc
         sys.stderr.write("[warn] 读取失败 %s: %s\n" % (path, exc))
         return default
 
@@ -172,17 +174,19 @@ def replace_jsonl(path, rows):
             os.remove(tmp)
 
 
-def read_jsonl(path):
+def read_jsonl(path, strict=False):
     if not os.path.exists(path):
         return []
     out = []
     with open(path, "r", encoding="utf-8") as fh:
-        for line in fh:
+        for line_number, line in enumerate(fh, 1):
             line = line.strip()
             if line:
                 try:
                     out.append(json.loads(line))
-                except Exception:  # noqa: BLE001 —— 坏行跳过不中断检索
+                except Exception as exc:  # 查询可跳过坏行；写回前必须严格读取。
+                    if strict:
+                        raise ValueError("流水第 %d 行损坏，拒绝覆盖: %s" % (line_number, path)) from exc
                     continue
     return out
 
