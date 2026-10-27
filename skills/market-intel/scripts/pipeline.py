@@ -170,6 +170,44 @@ def run_round(ws, baseline=False):
             pass
 
 
+def rekey_baseline(ws):
+    """存量基线键迁移：把 streams 快照里旧规则（guid:URL / URL#N 形态）的键
+    统一重算为内容正交键（collect.entry_key_of 同一规则）。
+
+    不迁移的后果：键分配修复后首轮差分把全部现有条目当成 removed+added
+    一次性重报。同键重复条目迁移时去重（保留首条）。幂等：可安全重跑。
+    """
+    import collect as collect_mod
+    sdir = os.path.join(ws, "state", "streams")
+    if not os.path.isdir(sdir):
+        print("无基线快照目录: %s" % sdir)
+        return 0
+    total, dup, changed = 0, 0, 0
+    for fn in sorted(os.listdir(sdir)):
+        if not fn.endswith(".json"):
+            continue
+        path = os.path.join(sdir, fn)
+        rec = core.jload(path, None)
+        if not rec:
+            continue
+        merged, seen = [], set()
+        for e in rec.get("entries", []):
+            total += 1
+            nk = collect_mod.entry_key_of(e)
+            if nk != e.get("key"):
+                changed += 1
+            e = dict(e, key=nk)
+            if nk in seen:
+                dup += 1  # 同内容多板块重复条目，合并为一条
+                continue
+            seen.add(nk)
+            merged.append(e)
+        core.jdump(path, dict(rec, entries=merged))
+        print("  %s: %d 条 → %d 键" % (fn, len(rec.get("entries", [])), len(merged)))
+    print("迁移完成：共 %d 条，改键 %d，合并重复 %d（幂等，可重跑）" % (total, changed, dup))
+    return 0
+
+
 def init_ws(ws):
     cfg_dir = os.path.join(core.SCRIPT_DIR, "..", "config")
     todo = []
@@ -202,10 +240,14 @@ def main():
     ap.add_argument("--init", action="store_true", help="初始化工作区（复制配置模板并输出待办）")
     ap.add_argument("--baseline", action="store_true", help="建基线：快照当前全部条目，不产出变更不通知")
     ap.add_argument("--run", action="store_true", help="常规一轮：采集 + 差分 -> out/latest.json")
+    ap.add_argument("--rekey-baseline", action="store_true",
+                    help="一次性基线键迁移：快照键统一重算为内容正交键（键分配修复后必须执行一次）")
     args = ap.parse_args()
     ws = core.workspace(args.workspace)
     if args.init:
         raise SystemExit(init_ws(ws))
+    if args.rekey_baseline:
+        raise SystemExit(rekey_baseline(ws))
     if args.baseline:
         raise SystemExit(run_round(ws, baseline=True))
     if args.run:

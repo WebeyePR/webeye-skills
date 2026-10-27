@@ -96,28 +96,28 @@ def parse_feed(body):
     if entries and all(not e["title"] for e in entries):
         raise ValueError("RSS 条目标题全空，疑似页面改版或编码问题，按源失败处理")
 
-    # 键分配（先统计链接共用情况）
-    link_count = {}
+    # 键分配（内容正交）：同一链接无论批内出现几次，键恒定为归一 URL。
+    # 此前按「批内链接唯一才用链接、重复则 guid:/#N」分配，同一活动在列表页多板块
+    # 重复展示时跨批拿到 guid:URL / URL#2 等不同键 → change_id 漂移 → 已发防重发
+    # 失效（每轮已通报活动以新变更身份入窗）。同键重复条目由差分层 dict 化自然合并。
     for e in entries:
-        k = core.norm_url(e["link"])
-        if k:
-            link_count[k] = link_count.get(k, 0) + 1
-    used = set()
-    for e in entries:
-        link_key = core.norm_url(e["link"])
-        if link_key and link_count[link_key] == 1:
-            key = link_key
-        elif e.get("_guid"):
-            key = "guid:" + e["_guid"]
-        else:
-            key = "t:" + core.sha1((e["title"] or "") + "|" + (e["published"] or ""))
-        n, i = 2, key
-        while i in used:  # 极端兜底：仍冲突则加后缀，保证键唯一
-            i = "%s#%d" % (key, n)
-            n += 1
-        used.add(i)
-        e["key"] = i
+        e["key"] = entry_key_of(e)
     return entries
+
+
+def entry_key_of(e):
+    """条目内容正交键：归一链接 > guid > 标题哈希（纯函数，基线迁移复用同一规则）。"""
+    link_key = core.norm_url(e.get("link"))
+    if link_key:
+        return link_key
+    guid = e.get("_guid") or e.get("guid")
+    if guid:
+        return "guid:" + guid
+    # 无链接无 guid：快照条目保留原键（guid:/t: 形态本就内容稳定——迁移场景
+    # 快照不存 guid 字段，重算 t: 哈希反而会与新鲜抓取的 guid: 键错位成假新增）
+    if e.get("key") and str(e["key"]).startswith(("t:", "guid:")):
+        return e["key"]
+    return "t:" + core.sha1((e.get("title") or "") + "|" + (e.get("published") or ""))
 
 
 # ---------- 页面监测 ----------

@@ -108,7 +108,13 @@ def grounding_check(rec, change):
     返回 (unverified_numbers, grounded_notes)：grounded_notes 供落盘审计。
     """
     src_text = ((change or {}).get("title") or "") + " " + ((change or {}).get("summary") or "")
-    probe = (rec.get("title") or "") + " " + (rec.get("summary") or "")
+    # probe 只查说明（summary）：title 是「原样带回」契约（陷阱 23），AI 不改写；
+    # 且页面监测源的 title 尾部带动态计数器（阅读/热度数，2026-10-27 实测
+    # 449→463 漂移），复用拷回场景必产生误报告警——title 不参与数字核对。
+    probe = rec.get("summary") or ""
+    if change is None:
+        # 变更已滚出本轮窗口（复用拷回常见）：无证据可查，跳过核对（告警无意义）
+        return [], {}
     src_nums = set(re.findall(r"\d+(?:\.\d+)?", src_text))
     declared = rec.get("number_notes") or {}
     variants = _conv_variants({float(x) for x in src_nums})
@@ -134,10 +140,16 @@ def _near(num_str, variants):
 
 # ---------- 覆盖度校验 ----------
 
-def coverage_check(latest, intel, fact_records):
-    """每个 change_id 必须被 intel（含 merged/discard）或 facts.change_ids 覆盖。返回缺失列表。"""
+def coverage_check(latest, intel, fact_records, already_judged=None):
+    """每个 change_id 必须被 intel（含 merged/discard）、facts.change_ids 或
+    历史登记（log/intel.jsonl + log/discarded.jsonl）覆盖。返回缺失列表。
+
+    历史登记视为已判：覆盖度防的是「窗口内有条目从未被任何一轮判过」，
+    而不是强迫每次输入重答全量——facts 补录、增量判定等合法场景的条目
+    若此前轮次已落盘，不应再拦（实测 facts-only 输入被误拦退出码 2）。
+    """
     changes = (latest or {}).get("changes") or []
-    covered = set()
+    covered = set(already_judged or set())
     for r in intel:
         if r.get("change_id"):
             covered.add(r["change_id"])
@@ -354,11 +366,16 @@ def _section_heading(text):
             "margin": "16px 0px 4px 0px"}
 
 
-def _activity_elements(records, limit=3):
+def _activity_elements(records, limit=8):
     """活动日历段：judged 里 type=活动情报 且带 activity 明细的记录。
 
     行内粗体闭合符后必须跟空格（`**时间：** 值`）：全角标点+紧贴正文会让
     markdown 粗体失效、星号原样显示（实测陷阱）。
+
+    limit=8 而非 3：活动条目为单行短文本不爆卡；截断的 notify=true 活动
+    在锚点推进后会永久漏发（logged_at 早于新锚点，违反宁重勿漏——2026-10-27
+    洁净重置积压 5 活动实测截掉 2 条从未发出的）。日常窗口活动仅 1-2 条，
+    上限只在积压场景生效。
     """
     els = []
     # significant 排序后再截断：high 活动不能被原序靠前的 normal 挤出日历
@@ -383,9 +400,12 @@ def _activity_elements(records, limit=3):
 
 
 def _news_elements(records, limit=3):
-    """行业重点新闻段：编号红字标题 + 摘要 + 原文按钮。"""
+    """行业重点新闻段：编号红字标题 + 摘要 + 原文按钮。
+
+    纵深防御：无 title 的记录跳过且不占编号（上游护栏之外的最后防线，防坏卡）。
+    """
     els = []
-    shown = sorted([r for r in records if not r.get("discard")],
+    shown = sorted([r for r in records if not r.get("discard") and r.get("title")],
                    key=lambda r: SIG_ORDER.get(r.get("significance"), 3))[:limit]
     for i, r in enumerate(shown, 1):
         els.append({"tag": "markdown",
@@ -571,7 +591,7 @@ def demote_already_sent(intel, sent_ids):
     return intel, demoted
 
 
-def _dry_run_input(ws, input_path, already_sent=None):
+def _dry_run_input(ws, input_path, already_sent=None, sent_before=None):
     """沙箱预检：把工作区完整复制到临时目录后执行真实 --input 流程，真实工作区零写入。
 
     洁净验证每轮都是新场景，历史上多次出现「落盘时才暴露」的问题（字段白名单、
@@ -591,16 +611,16 @@ def _dry_run_input(ws, input_path, already_sent=None):
                 shutil.copytree(src, dst)
             else:
                 shutil.copy2(src, dst)
-        rc = cmd_input(tmp, input_path, already_sent=already_sent)
+        rc = cmd_input(tmp, input_path, already_sent=already_sent, sent_before=sent_before)
         sys.stderr.write("[dry-run] 沙箱预检通过（真实工作区零写入）——去掉 --dry-run 正式执行\n")
         return rc
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def cmd_input(ws, input_path, already_sent=None, dry_run=False):
+def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None):
     if dry_run:
-        return _dry_run_input(ws, input_path, already_sent=already_sent)
+        return _dry_run_input(ws, input_path, already_sent=already_sent, sent_before=sent_before)
     now = core.now_iso()
     latest = core.jload(os.path.join(ws, "out", "latest.json"), None)
     judged = core.jload(input_path, None)
@@ -612,9 +632,15 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False):
                          "下次构建可直接只填 intel 列表\n" % len(judged.get("discarded") or []))
     if already_sent:
         sent_path = os.path.expanduser(already_sent)
+        cut = (core.parse_iso(sent_before) or 0) if sent_before else None
         sent_ids = set()
         for r in core.read_jsonl(sent_path) if os.path.exists(sent_path) else []:
             if r.get("discard"):
+                continue
+            # notify=true 且落盘时间晚于旧锚点（--sent-before）：判定后从未随
+            # 内参发出过（上轮「落盘不发、锚点未推进」场景），不算已发——
+            # 压制会造成漏发（宁重勿漏）。notify=false 属归档语义，无条件算已发。
+            if r.get("notify") and cut and (core.parse_iso(r.get("logged_at")) or 0) >= cut:
                 continue
             sent_ids.add(r.get("change_id"))
             # 被合并条目也属已发：合并报道换源重现时（如 Anthropic IPO 的 36氪/
@@ -632,13 +658,44 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False):
                          % ", ".join(sorted(stripped)))
     for r in intel:
         core.check_keys(r, INTEL_KEYS, "intel record")
+    # 通知内容护栏：notify=true 的记录会直接进卡片，缺 title/url 产坏卡。
+    # 必须放在 sent-guard 之后——复用旧精简登记的墓碑记录（无 title）已被压成
+    # notify=false，不受影响；此护栏拦的是 AI 判定真要通知却漏带正文的场景。
+    bad_notify = [r.get("change_id") for r in intel
+                  if r.get("notify") and (not r.get("title") or not r.get("url"))]
+    if bad_notify:
+        sys.stderr.write("[coverage] 以下 notify=true 情报缺 title/url（无法产卡，"
+                         "标题与链接必须从 latest.json 原文带回）:\n  %s\n" % "\n  ".join(bad_notify))
+        raise SystemExit(2)
+    # 语义护栏：**本轮窗口内**的条目不允许裸骨架（无 title 且非弃权/墓碑）——
+    # 窗口条目必须得到完整判定，裸骨架 = 组装脚本丢失正文/理由（2026-10-27 实测：
+    # 对旧 discarded.jsonl 的 {change_id, reason} 形态误剥所致，弃权理由永久丢失）。
+    # 窗口外的历史精简留痕（v0.3.2 前 significance=unknown+notify=false 形态，
+    # 本就无 title）语义合法，放行；其空条目风险由 _news_elements 的 title
+    # 防御兜底。
+    window_ids = {c["change_id"] for c in ((latest or {}).get("changes") or [])}
+    skeletons = [r.get("change_id") for r in intel
+                 if not r.get("discard") and not r.get("title")
+                 and not r.get("suppressed_by_guard") and r.get("change_id") in window_ids]
+    if skeletons:
+        sys.stderr.write("[coverage] 以下窗口条目为裸骨架（无 title 且非弃权/墓碑，"
+                         "组装丢失正文；复用旧 discarded.jsonl 需保留 reason 字段供归一）:\n  %s\n"
+                         % "\n  ".join(skeletons))
+        raise SystemExit(2)
 
-    # 1) 覆盖度校验：漏答一条 = 判断不完整（latest.json 缺失时显式告警，不做静默全过）
+    # 1) 覆盖度校验：漏答一条 = 判断不完整（latest.json 缺失时显式告警，不做静默全过）。
+    #    历史登记（log/intel.jsonl + log/discarded.jsonl）视为已判，支持 facts 补录
+    #    与增量判定场景——只要求「从未判过」的条目在本轮得到回答。
+    judged_before = set()
+    for log_name in ("intel.jsonl", "discarded.jsonl"):
+        for rec in core.read_jsonl(os.path.join(ws, "log", log_name)):
+            if rec.get("change_id"):
+                judged_before.add(rec["change_id"])
     if latest is None:
         sys.stderr.write("[warn] out/latest.json 缺失，本轮不做覆盖度校验（手工补录场景）\n")
         missing = []
     else:
-        missing = coverage_check(latest, intel, fact_records)
+        missing = coverage_check(latest, intel, fact_records, already_judged=judged_before)
     if missing:
         sys.stderr.write("[coverage] 以下 change_id 未判（补全后重跑，pending 已保留）:\n  %s\n"
                          % "\n  ".join(missing))
@@ -787,8 +844,9 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False):
                                tags=[("%d 条 P0 线索，请尽快跟进" % len(p0_leads), "red")])
             cards.append(write_card(ws, "card-leads-%s-group.json" % stamp(), gcard))
 
-    # 6) 核销待判队列
-    judged_ids = set()
+    # 6) 核销待判队列：历史已判（judged_before）同样核销——否则 facts 补录等
+    #    增量输入会把已判条目留在 pending，下轮以 reopened 身份误回放
+    judged_ids = set(judged_before)
     for r in intel:
         if r.get("change_id"):
             judged_ids.add(r["change_id"])
@@ -942,15 +1000,9 @@ def cmd_digest(ws, commit=False):
     records = [r for r in records if not r.get("suppressed_by_guard")]
     leads = [l for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))
              if not anchor or (core.parse_iso(l.get("logged_at")) or 0) > (core.parse_iso(anchor) or 0)]
-    if commit:
-        # 锚点必须同时覆盖情报与线索的 logged_at：只看 intel 会把更晚落盘的线索
-        # 留在窗口里，下期日报重复展示已发过的线索（宁重勿漏只对情报成立，线索有去重键）。
-        stamps = [r.get("logged_at") for r in core.read_jsonl(os.path.join(ws, "log", "intel.jsonl"))] \
-            + [l.get("logged_at") for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))]
-        new_anchor = max([a for a in stamps if a] + [anchor or ""])
-        core.jdump(os.path.join(ws, "state", "digest_anchor.json"), {"anchor": new_anchor, "committed_at": now})
-        print("摘要锚点已推进到: %s" % new_anchor)
-        return 0
+    # 连用陷阱代码化（2026-10-27 实测坑）：旧实现 --commit 分支提前 return，
+    # 导致 --digest --commit 连用只推进锚点、摘要卡从未产出，且无任何提示——
+    # 修复为「先产卡、后推进锚点」，连用语义变为产卡+推锚一步完成。
     by_type = {}
     for r in records:
         by_type[r.get("type") or "未分类"] = by_type.get(r.get("type") or "未分类", 0) + 1
@@ -968,6 +1020,9 @@ def cmd_digest(ws, commit=False):
             # 全空不产空卡（与 SKILL.md 纪律一致）：briefing 版式三段全空返回
             # None 后，simple 降级分支也不得产出"0 条动态"占位卡
             print("窗口内无增量（情报 0、线索 0），不产空卡；如需推进锚点加 --commit")
+            if commit:
+                new_anchor = _advance_anchor(ws, anchor, now)
+                print("摘要锚点已推进到: %s" % new_anchor)
             return 0
         blocks = [_block(["**本时段市场情报 %d 条**，新线索 %d 条" % (len(records), len(leads)),
                           "、".join("%s %d" % (k, v) for k, v in sorted(by_type.items(), key=lambda x: -x[1])) or "无"],
@@ -981,8 +1036,24 @@ def cmd_digest(ws, commit=False):
                           tags=[("%d 条动态" % len(records), "violet"), ("%d 条新线索" % len(leads), "green")],
                           icon={**INTEL_ICON, "color": "violet"})
         path = write_card(ws, "card-digest-%s.json" % stamp(), card)
-    print("摘要卡已产出: %s（发送成功后请跑 --digest --commit 推进锚点）" % path)
+    print("摘要卡已产出: %s" % path)
+    if commit:
+        # 锚点必须同时覆盖情报与线索的 logged_at：只看 intel 会把更晚落盘的线索
+        # 留在窗口里，下期日报重复展示已发过的线索（宁重勿漏只对情报成立，线索有去重键）。
+        new_anchor = _advance_anchor(ws, anchor, now)
+        print("摘要锚点已推进到: %s" % new_anchor)
+    else:
+        print("（发送成功后请跑 --digest --commit 推进锚点）")
     return 0
+
+
+def _advance_anchor(ws, anchor, now):
+    # 锚点推进逻辑抽出复用（intel + leads 双覆盖）
+    stamps = [r.get("logged_at") for r in core.read_jsonl(os.path.join(ws, "log", "intel.jsonl"))] \
+        + [l.get("logged_at") for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))]
+    new_anchor = max([a for a in stamps if a] + [anchor or ""])
+    core.jdump(os.path.join(ws, "state", "digest_anchor.json"), {"anchor": new_anchor, "committed_at": now})
+    return new_anchor
 
 
 # ---------- 状态简报 ----------
@@ -1015,6 +1086,9 @@ def main():
     ap.add_argument("--input", help="judged.json 路径")
     ap.add_argument("--already-sent",
                     help="旧 intel.jsonl 路径（洁净重置防重发）：命中的已发情报强制 notify=false")
+    ap.add_argument("--sent-before",
+                    help="ISO 时刻（传洁净重置前的 digest 锚点）：旧登记中该时刻之后落盘的 "
+                         "notify=true 记录从未随内参发出，不算已发（防漏发，宁重勿漏）")
     ap.add_argument("--dry-run", action="store_true",
                     help="沙箱预检：临时副本上完整演练 --input 流程并报告问题，真实工作区零写入")
     ap.add_argument("--digest", action="store_true", help="产出每日摘要卡（delta 窗口）")
@@ -1066,7 +1140,7 @@ def main():
         raise SystemExit(cmd_status(ws))
     if args.input:
         raise SystemExit(cmd_input(ws, args.input, already_sent=args.already_sent,
-                                   dry_run=args.dry_run))
+                                   dry_run=args.dry_run, sent_before=args.sent_before))
     ap.print_help()
 
 

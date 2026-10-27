@@ -73,22 +73,55 @@ class TestParseFeed(unittest.TestCase):
       <item><title>C</title><link>https://x.com/same</link><guid>g-c</guid><pubDate>Wed, 22 Oct 2026 08:00:00 GMT</pubDate></item>
     </channel></rss>"""
 
-    def test_shared_link_uses_guid(self):
-        entries = collect.parse_feed(self.FEED)
-        keys = [e["key"] for e in entries]
-        self.assertEqual(len(keys), len(set(keys)), "键必须唯一")
-        self.assertIn("https://x.com/post/1", keys)
-        self.assertIn("guid:g-b", keys)
-        self.assertIn("guid:g-c", keys)
+    def test_key_content_orthogonal(self):
+        """键内容正交：同链接无论批内出现几次键恒定（v0.3.9 修复批内重复致键漂移）。
 
-    def test_shared_link_key_stable_under_rotation(self):
-        """GCP 发布说明式轮换：同一批条目顺序整体偏移，键不得变（防 phantom changed）。"""
-        entries = collect.parse_feed(self.FEED)
-        root = collect.parse_feed(self.FEED.replace("<title>A</title>", "<title>A2</title>"))
-        # 只改标题不改链接/guid：共用链接的键仍应稳定
-        keys_a = {e["key"] for e in entries if e["key"].startswith("guid:")}
-        keys_b = {e["key"] for e in root if e["key"].startswith("guid:")}
-        self.assertEqual(keys_a, keys_b)
+        此前共享链接时键取 guid:/#N 形态，活动行同一活动在列表页多板块重复展示，
+        跨批拿到不同键 → change_id 漂移 → 已通报内容每轮以新变更身份重复入窗。
+        """
+        # 活动只出现一次：键 = 归一链接
+        single = collect.parse_feed(self.FEED.replace(
+            '<item><title>C</title><link>https://x.com/same</link><guid>g-c</guid><pubDate>Wed, 22 Oct 2026 08:00:00 GMT</pubDate></item>', ''))
+        k_single = [e["key"] for e in single if e["link"] == "https://x.com/same"][0]
+        self.assertEqual(k_single, "https://x.com/same")
+        # 同一活动批内重复出现（列表页多板块场景）：键不因批内重复而漂移
+        dup_feed = self.FEED.replace("</channel>",
+            "<item><title>C2</title><link>https://x.com/same</link><guid>g-c</guid></item>"
+            "<item><title>C3</title><link>https://x.com/same</link><guid>g-c</guid></item></channel>")
+        dup = collect.parse_feed(dup_feed)
+        k_dup = {e["key"] for e in dup if e["link"] == "https://x.com/same"}
+        self.assertEqual(k_dup, {"https://x.com/same"}, "重复条目同键，由差分层 dict 化合并")
+
+    def test_linkless_entries_stable_keys(self):
+        """无链接条目兜底：guid 优先（稳定），guid 缺失按标题+时间哈希（确定可复算）。"""
+        e_guid = {"title": "T", "link": None, "published": None, "_guid": "g-1"}
+        e_hash = {"title": "T", "link": None, "published": "2026-10-27", "key": None}
+        self.assertEqual(collect.entry_key_of(e_guid), "guid:g-1")
+        k1 = collect.entry_key_of(e_hash)
+        self.assertEqual(k1, collect.entry_key_of(dict(e_hash)), "t: 键必须确定")
+        self.assertTrue(k1.startswith("t:"))
+        # 快照条目（无 _guid 字段）原样保留 t: 键
+        self.assertEqual(collect.entry_key_of({"title": "T", "link": None, "key": "t:abc"}), "t:abc")
+
+    def test_rekey_baseline_migrates_and_dedupes(self):
+        """基线键迁移：旧形态键（guid:URL/URL#2）统一重算为归一链接并去重，幂等。"""
+        ws = tempfile.mkdtemp(prefix="mi-rekey-")
+        os.makedirs(os.path.join(ws, "state", "streams"))
+        old = {"collected_at": "2026-10-26T00:00:00+08:00", "entries": [
+            {"key": "guid:https://e.com/a", "title": "活动A", "link": "https://e.com/a"},
+            {"key": "guid:https://e.com/a#2", "title": "活动A(板块2)", "link": "https://e.com/a"},
+            {"key": "https://e.com/b/", "title": "活动B", "link": "https://e.com/b/"},
+        ]}
+        core.jdump(diffcore.stream_path(ws, "s1"), old)
+        rc = pipeline.rekey_baseline(ws)
+        self.assertEqual(rc, 0)
+        new = core.jload(diffcore.stream_path(ws, "s1"), {})
+        keys = [e["key"] for e in new["entries"]]
+        self.assertEqual(keys, ["https://e.com/a", "https://e.com/b"], "改键 + 去重 + 尾斜杠归一")
+        # 幂等：重跑无变化
+        pipeline.rekey_baseline(ws)
+        again = core.jload(diffcore.stream_path(ws, "s1"), {})
+        self.assertEqual([e["key"] for e in again["entries"]], keys)
 
 
 class TestParseAmount(unittest.TestCase):
@@ -140,6 +173,22 @@ class TestGrounding(unittest.TestCase):
         rec = {"title": "OpenAI 新融资", "summary": "OpenAI 融资 777 亿美元"}
         unverified, _ = judge.grounding_check(rec, self.CHANGE)
         self.assertEqual(unverified, ["777"])
+
+    def test_title_dynamic_counter_not_probed(self):
+        """title 不参与数字核对（2026-10-27 代码化）：页面监测源 title 尾部带
+        动态计数器（阅读/热度数，实测 449→463 漂移），复用拷回场景 title 里的
+        旧数字不得触发误报；summary 里的虚构数字仍然拦截。"""
+        change = {"title": "禁令影响扩大 10-26 07:19 463", "summary": "IDC 分析"}
+        rec = {"title": "禁令影响扩大 10-26 07:19 449", "summary": "政策风险升级"}
+        unverified, _ = judge.grounding_check(rec, change)
+        self.assertEqual(unverified, [], "title 原样带回契约，动态计数器漂移不应误报")
+
+    def test_change_out_of_window_skips_grounding(self):
+        """变更已滚出本轮窗口（change=None，复用拷回常见）：无证据可查，
+        跳过核对，不得对说明里的合法数字（如年份 2026）误报。"""
+        rec = {"title": "2026物流展", "summary": "2026亚洲国际物流展于11月举办"}
+        unverified, notes = judge.grounding_check(rec, None)
+        self.assertEqual((unverified, notes), ([], {}))
 
 
 class TestEntity(unittest.TestCase):
@@ -350,6 +399,20 @@ class TestCoverage(unittest.TestCase):
         latest = {"changes": [{"change_id": "a"}, {"change_id": "b"}]}
         missing = judge.coverage_check(latest, [{"change_id": "a", "merged_change_ids": ["b"]}], [])
         self.assertEqual(missing, [])
+
+    def test_already_judged_history_credits_coverage(self):
+        """facts 补录/增量判定：历史登记已判的条目不算缺失（facts-only 输入不被误拦）。"""
+        latest = {"changes": [{"change_id": "a"}, {"change_id": "b"}]}
+        missing = judge.coverage_check(latest, [], [], already_judged={"a", "b"})
+        self.assertEqual(missing, [])
+        # 历史只覆盖一半：另一半仍须本轮回答
+        missing = judge.coverage_check(latest, [], [], already_judged={"a"})
+        self.assertEqual(missing, ["b"])
+
+    def test_no_history_still_blocks(self):
+        """不传历史（旧调用方式）时行为不变：未答条目照常报缺失。"""
+        latest = {"changes": [{"change_id": "a"}]}
+        self.assertEqual(judge.coverage_check(latest, [], []), ["a"])
 
 
 class TestEndToEnd(unittest.TestCase):
@@ -755,6 +818,23 @@ class TestDigestAnchor(unittest.TestCase):
         leads = [l for l in core.read_jsonl(os.path.join(self.ws, "log", "leads.jsonl"))
                  if (core.parse_iso(l.get("logged_at")) or 0) > (core.parse_iso(anchor) or 0)]
         self.assertEqual(len(leads), 1)
+
+    def test_digest_commit_combined_produces_card_and_anchor(self):
+        """--digest --commit 连用必须先产卡再推锚（2026-10-27 实测坑：旧实现
+        commit 分支提前 return，连用只推锚点、摘要卡从未产出且无提示）。"""
+        with open(os.path.join(self.ws, "log", "intel.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"change_id": "a", "type": "融资事件",
+                                "title": "测试公司完成融资", "summary": "测试",
+                                "url": "https://example.com", "notify": True,
+                                "significance": "normal",
+                                "logged_at": "2026-10-23T08:00:00+08:00"},
+                               ensure_ascii=False) + "\n")
+        judge.cmd_digest(self.ws, commit=True)
+        cards = [f for f in os.listdir(os.path.join(self.ws, "out"))
+                 if f.startswith("card-daily-") or f.startswith("card-digest-")]
+        self.assertTrue(cards, "连用 --commit 也必须产出摘要卡，不许静默跳过")
+        anchor = core.jload(os.path.join(self.ws, "state", "digest_anchor.json"), {}).get("anchor")
+        self.assertEqual(anchor, "2026-10-23T21:00:00+08:00", "产卡后锚点正常推进")
 
 
 class TestBriefingRankSection(unittest.TestCase):
@@ -1187,6 +1267,40 @@ class TestDemoteAlreadySent(unittest.TestCase):
         self.assertFalse(out[0]["notify"], "被合并条目换源重现必须被压制")
         self.assertTrue(out[1]["notify"])
 
+    def test_sent_before_spares_unsent_recent_records(self):
+        """--sent-before：锚点之后落盘的 notify=true 记录从未发出，不算已发（防漏发）。
+
+        场景：上轮判定落盘 notify=true 但未 digest/未推进锚点即洁净重置——
+        这些记录若按旧登记全量压制，本轮内参会漏掉从未发出的内容。
+        """
+        import tempfile
+        old_log = [
+            {"change_id": "old-sent", "notify": True, "logged_at": "2026-10-27T00:50:00+08:00"},
+            {"change_id": "pending-send", "notify": True, "logged_at": "2026-10-27T01:33:00+08:00"},
+            {"change_id": "archived", "notify": False, "logged_at": "2026-10-27T01:40:00+08:00"},
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            for r in old_log:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            path = f.name
+        cut = core.parse_iso("2026-10-27T00:54:19+08:00")
+        sent_ids = set()
+        for r in core.read_jsonl(path):
+            if r.get("discard"):
+                continue
+            if r.get("notify") and (core.parse_iso(r.get("logged_at")) or 0) >= cut:
+                continue  # 锚点后落盘的 notify=true：从未发出
+            sent_ids.add(r.get("change_id"))
+        os.unlink(path)
+        intel = [{"change_id": "old-sent", "notify": True},
+                 {"change_id": "pending-send", "notify": True},
+                 {"change_id": "archived", "notify": True}]
+        out, n = judge.demote_already_sent(intel, sent_ids)
+        self.assertEqual(n, 2)
+        self.assertFalse(out[0]["notify"], "锚点前已随内参发出的必须压制")
+        self.assertTrue(out[1]["notify"], "锚点后落盘从未发出的不得压制（宁重勿漏）")
+        self.assertFalse(out[2]["notify"], "归档语义（notify=false）无条件算已发")
+
 
 class TestStripWriteback(unittest.TestCase):
     """洁净重置复用旧登记：落盘回写字段必须自动剥离，不再被白名单拦截。"""
@@ -1218,6 +1332,144 @@ class TestStripWriteback(unittest.TestCase):
         self.assertEqual(intel[0]["discard_reason"], "行情噪声")
         self.assertNotIn("reason", intel[0])
         self.assertNotIn("logged_at", intel[0])
+
+
+class TestNotifyContentGuard(unittest.TestCase):
+    """通知内容护栏：notify=true 缺 title/url 直接产坏卡，必须在落盘前拦截（退出码 2）。
+
+    放在 sent-guard 之后执行：复用旧精简登记的墓碑记录（无 title）已被压成
+    notify=false，不受影响——护栏只拦 AI 判定真要通知却漏带正文的场景。
+    """
+
+    def _run_input(self, intel, tmp):
+        latest = {"run_at": "2026-10-27T01:00:00+08:00", "changes": [
+            {"change_id": r["change_id"], "title": "原文标题", "summary": "", "url": "https://x/1"}
+            for r in intel]}
+        core.jdump(os.path.join(tmp, "out", "latest.json"), latest)
+        core.jdump(os.path.join(tmp, "judged.json"), {"intel": intel, "facts": []})
+        return judge.cmd_input(tmp, os.path.join(tmp, "judged.json"))
+
+    def test_notify_true_missing_title_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="mi-guard-") as tmp:
+            os.makedirs(os.path.join(tmp, "out"))
+            intel = [{"change_id": "a", "type": "行业动态", "significance": "normal",
+                      "title": "完整记录", "url": "https://x/1", "sources": [],
+                      "notify": True, "notify_reason": "r"},
+                     {"change_id": "b", "type": "行业动态", "significance": "normal",
+                      "notify": True, "notify_reason": "r"}]  # 缺 title/url
+            with self.assertRaises(SystemExit) as cm:
+                self._run_input(intel, tmp)
+            self.assertEqual(cm.exception.code, 2)
+
+    def test_demoted_skeleton_passes(self):
+        """被 sent-guard 压制的无 title 墓碑记录不得被护栏误伤（复用流不被破坏）。"""
+        with tempfile.TemporaryDirectory(prefix="mi-guard-") as tmp:
+            os.makedirs(os.path.join(tmp, "out"))
+            os.makedirs(os.path.join(tmp, "log"))
+            intel = [{"change_id": "a", "significance": "normal", "notify": True}]  # 无 title
+            sent_path = os.path.join(tmp, "sent.jsonl")
+            with open(sent_path, "w") as f:
+                f.write(json.dumps({"change_id": "a", "title": "旧文", "notify": True}) + "\n")
+            latest = {"run_at": "2026-10-27T01:00:00+08:00", "changes": [
+                {"change_id": "a", "title": "原文标题", "summary": "", "url": "https://x/1"}]}
+            core.jdump(os.path.join(tmp, "out", "latest.json"), latest)
+            core.jdump(os.path.join(tmp, "judged.json"), {"intel": intel, "facts": []})
+            rc = judge.cmd_input(tmp, os.path.join(tmp, "judged.json"), already_sent=sent_path)
+            self.assertEqual(rc, 0, "已压制的墓碑记录（notify=false）必须放行")
+
+    def test_bare_skeleton_rejected(self):
+        """窗口内的裸 {change_id} 骨架必须在落盘前拦截——
+        组装脚本对旧 discarded.jsonl 的 {change_id, reason} 形态误剥的实测坑。"""
+        with tempfile.TemporaryDirectory(prefix="mi-guard-") as tmp:
+            os.makedirs(os.path.join(tmp, "out"))
+            os.makedirs(os.path.join(tmp, "log"))
+            intel = [{"change_id": "a"},  # 窗口内裸骨架
+                     {"change_id": "b", "discard": True, "discard_reason": "行情噪声"}]
+            latest = {"run_at": "2026-10-27T01:00:00+08:00", "changes": [
+                {"change_id": "a", "title": "t", "url": "u"},
+                {"change_id": "b", "title": "t2", "url": "u2"}]}
+            core.jdump(os.path.join(tmp, "out", "latest.json"), latest)
+            core.jdump(os.path.join(tmp, "judged.json"), {"intel": intel, "facts": []})
+            with self.assertRaises(SystemExit) as cm:
+                judge.cmd_input(tmp, os.path.join(tmp, "judged.json"))
+            self.assertEqual(cm.exception.code, 2)
+
+    def test_offwindow_legacy_skeleton_passes(self):
+        """窗口外的历史精简留痕（v0.3.2 前 unknown+false 形态，本就无 title）放行。"""
+        with tempfile.TemporaryDirectory(prefix="mi-guard-") as tmp:
+            os.makedirs(os.path.join(tmp, "out"))
+            os.makedirs(os.path.join(tmp, "log"))
+            intel = [{"change_id": "legacy", "notify": False, "significance": "unknown"},
+                     {"change_id": "other", "discard": True, "discard_reason": "真消失"}]
+            latest = {"run_at": "2026-10-27T01:00:00+08:00", "changes": [
+                {"change_id": "other", "title": "t", "url": "u"}]}  # legacy 不在窗口
+            core.jdump(os.path.join(tmp, "out", "latest.json"), latest)
+            core.jdump(os.path.join(tmp, "judged.json"), {"intel": intel, "facts": []})
+            self.assertEqual(judge.cmd_input(tmp, os.path.join(tmp, "judged.json")), 0)
+
+    def test_suppressed_tombstone_without_title_passes(self):
+        """带 suppressed_by_guard 的墓碑（无 title）放行——防重发契约不被误伤。"""
+        with tempfile.TemporaryDirectory(prefix="mi-guard-") as tmp:
+            os.makedirs(os.path.join(tmp, "out"))
+            os.makedirs(os.path.join(tmp, "log"))
+            intel = [{"change_id": "a", "significance": "unknown", "notify": False,
+                      "suppressed_by_guard": True}]
+            latest = {"run_at": "2026-10-27T01:00:00+08:00", "changes": [
+                {"change_id": "a", "title": "t", "url": "u"}]}
+            core.jdump(os.path.join(tmp, "out", "latest.json"), latest)
+            core.jdump(os.path.join(tmp, "judged.json"), {"intel": intel, "facts": []})
+            self.assertEqual(judge.cmd_input(tmp, os.path.join(tmp, "judged.json")), 0)
+
+
+class TestCoverageHistoryCredit(unittest.TestCase):
+    """历史登记视为已判：facts 补录/增量判定不被覆盖度误拦，且已判条目被核销出 pending。"""
+
+    def _ws(self, tmp, latest_changes, log_lines):
+        os.makedirs(os.path.join(tmp, "out"))
+        os.makedirs(os.path.join(tmp, "log"))
+        core.jdump(os.path.join(tmp, "out", "latest.json"),
+                   {"run_at": "2026-10-27T01:00:00+08:00", "changes": latest_changes})
+        with open(os.path.join(tmp, "log", "intel.jsonl"), "w") as f:
+            for l in log_lines:
+                f.write(json.dumps(l) + "\n")
+
+    def test_facts_only_input_passes_coverage(self):
+        """窗口条目全部已判时，facts-only 输入放行（此前误拦退出码 2）。"""
+        with tempfile.TemporaryDirectory(prefix="mi-cov-") as tmp:
+            self._ws(tmp, [{"change_id": "a", "title": "t", "url": "u"}],
+                     [{"change_id": "a", "title": "旧文", "notify": False}])
+            jp = os.path.join(tmp, "judged.json")
+            core.jdump(jp, {"intel": [], "facts": []})
+            self.assertEqual(judge.cmd_input(tmp, jp), 0)
+
+    def test_unjudged_item_still_blocks(self):
+        """历史未覆盖的条目仍须本轮回答——护栏语义不放松。"""
+        with tempfile.TemporaryDirectory(prefix="mi-cov-") as tmp:
+            self._ws(tmp, [{"change_id": "a", "title": "t", "url": "u"},
+                           {"change_id": "b", "title": "t2", "url": "u2"}],
+                     [{"change_id": "a", "title": "旧文", "notify": False}])
+            jp = os.path.join(tmp, "judged.json")
+            core.jdump(jp, {"intel": [], "facts": []})
+            with self.assertRaises(SystemExit) as cm:
+                judge.cmd_input(tmp, jp)
+            self.assertEqual(cm.exception.code, 2)
+
+    def test_history_judged_items_cleared_from_pending(self):
+        """增量输入核销后，历史已判条目不得留在 pending（防下轮 reopened 误回放）。"""
+        with tempfile.TemporaryDirectory(prefix="mi-cov-") as tmp:
+            self._ws(tmp, [{"change_id": "a", "title": "t", "url": "u"},
+                           {"change_id": "b", "title": "t2", "url": "u2"}],
+                     [{"change_id": "a", "title": "旧文", "notify": False}])
+            # 预置 pending：a（历史已判）+ b（本轮判）
+            core.jdump(os.path.join(tmp, "state", "pending.json"),
+                       {"items": [{"change_id": "a"}, {"change_id": "b"}]})
+            jp = os.path.join(tmp, "judged.json")
+            core.jdump(jp, {"intel": [{"change_id": "b", "discard": True,
+                                       "discard_reason": "真消失"}], "facts": []})
+            self.assertEqual(judge.cmd_input(tmp, jp), 0)
+            p = core.jload(os.path.join(tmp, "state", "pending.json"), {})
+            self.assertEqual([i["change_id"] for i in p.get("items", [])], [],
+                             "历史已判的 a 与本轮判的 b 都应被核销")
 
 
 class TestSuppressedDigestFilter(unittest.TestCase):
