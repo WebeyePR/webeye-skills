@@ -30,6 +30,7 @@ import time
 
 import core
 import diffcore
+import delivery
 import facts as facts_mod
 import match as match_mod
 
@@ -1813,13 +1814,13 @@ def cmd_digest(ws, commit=False, hero_image=None):
     anchor_rec = core.jload(os.path.join(ws, "state", "digest_anchor.json"), {"anchor": None})
     anchor = anchor_rec.get("anchor")
     records = [r for r in core.read_jsonl(os.path.join(ws, "log", "intel.jsonl"))
-               if not anchor or (core.parse_iso(r.get("logged_at")) or 0) > (core.parse_iso(anchor) or 0)]
+               if delivery.in_window(r, "change_id", anchor_rec)]
     # 已通报压制（sent-guard 标记）的内容不进内参：洁净重置全量窗复判时，
     # 旧闻会被重新打包重复推送（2026-10-27 实测拦截后代码化）；AI 判定
     # notify=false 的记录不在此列——内参保留其归档展示语义。
     records = [r for r in records if not r.get("suppressed_by_guard")]
     leads = [l for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))
-             if not anchor or (core.parse_iso(l.get("logged_at")) or 0) > (core.parse_iso(anchor) or 0)]
+             if delivery.in_window(l, "lead_id", anchor_rec)]
     # 连用陷阱代码化（2026-10-27 实测坑）：旧实现 --commit 分支提前 return，
     # 导致 --digest --commit 连用只推进锚点、摘要卡从未产出，且无任何提示——
     # 修复为「先产卡、后推进锚点」，连用语义变为产卡+推锚一步完成。
@@ -1839,12 +1840,10 @@ def cmd_digest(ws, commit=False, hero_image=None):
     path = None
     view_url = ((load_notify(ws).get("bitable") or {}).get("view_url")) or LEAD_POOL_VIEW_URL
     if reuse:
-        # 复用已产出（且大概率已发出）的那批卡片，只推锚不重产——见上方 commit 复用说明
-        paths = [p for p in (batch_prev.get("cards") or []) if os.path.exists(p)]
-        missing = len(batch_prev.get("cards") or []) - len(paths)
-        if missing:
-            sys.stderr.write("[digest][warn] 待发送清单里 %d 张卡片已不存在（被清理？），"
-                             "推锚前请确认这批内容确实已发出\n" % missing)
+        # 缺失文件属于失败，不得降级产新卡后把旧清单一起确认。
+        paths = list(batch_prev["cards"])
+        if any(not os.path.isfile(p) for p in paths):
+            raise SystemExit("[digest] 待发送分片缺失，拒绝提交；清单已保留")
         print("复用待发送清单中的卡片（不重产）: %s" % "、".join(os.path.basename(p) for p in paths))
     else:
         try:
@@ -1862,10 +1861,8 @@ def cmd_digest(ws, commit=False, hero_image=None):
         if not records and not leads:
             # 全空不产空卡（与 SKILL.md 纪律一致）：briefing 版式三段全空返回
             # None 后，simple 降级分支也不得产出"0 条动态"占位卡
-            print("窗口内无增量（情报 0、线索 0），不产空卡；如需推进锚点加 --commit")
-            if commit:
-                new_anchor = _advance_anchor(ws, anchor, now)
-                print("摘要锚点已推进到: %s" % new_anchor)
+            # 没有待确认批次时重复提交是空操作，保留新锚的同秒边界信息。
+            print("窗口内无增量（情报 0、线索 0），不产空卡、不推进锚点")
             return 0
         blocks = [_block(["**本时段市场情报 %d 条**，新线索 %d 条" % (len(records), len(leads)),
                           "、".join("%s %d" % (k, v) for k, v in sorted(by_type.items(), key=lambda x: -x[1])) or "无"],
@@ -1895,15 +1892,10 @@ def cmd_digest(ws, commit=False, hero_image=None):
     # 注意：commit 且复用清单时**不要覆盖清单**（records 此刻已含本批，覆盖会污染覆盖范围）。
     batch = os.path.join(ws, "state", "digest_pending_send.json")
     if not reuse:
-        core.jdump(batch, {"created_at": now, "anchor_before": anchor,
-                           "cards": list(paths), "card_count": len(paths),
-                           "record_ids": [r.get("change_id") for r in records],
-                           "lead_ids": [l.get("lead_id") for l in leads],
-                           "committed": False})
+        batch_prev = delivery.manifest(list(paths), records, leads, anchor, now)
+        core.jdump(batch, batch_prev)
     if commit:
-        # 锚点必须同时覆盖情报与线索的 logged_at：只看 intel 会把更晚落盘的线索
-        # 留在窗口里，下期日报重复展示已发过的线索（宁重勿漏只对情报成立，线索有去重键）。
-        new_anchor = _advance_anchor(ws, anchor, now)
+        new_anchor = delivery.confirm(ws, batch_prev, anchor_rec, now)
         print("摘要锚点已推进到: %s" % new_anchor)
         print("[注意] 锚点已推进且本批记录已标记为「已通报」——若这张卡后续发送失败，"
               "这批内容不会再次出现在下期内参里（防重发优先于防漏发）。"

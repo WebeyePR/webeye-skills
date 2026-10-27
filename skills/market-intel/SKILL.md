@@ -9,7 +9,7 @@ description: >-
   榜单监控/潜在客户与业务情报，indigo 头图；榜单段有数据才出现），确认线索对接「猎隼线索池」多维表格（预设待权限校准）。适用于："最近八行业
   有什么动态"、"帮我盯种子到B轮刚融资的出海公司"、"这类线索定时推给我"。触发举例："市场情报简报"、
   "发现了哪些潜在客户"、"把某公司加入监控"。
-version: 0.6.10
+version: 0.6.11
 author: Webeye CSBU Team
 license: MIT
 alwaysActive: false
@@ -68,6 +68,9 @@ AIHOT 的词表与 tier 概念。**字段与结构能继承的一律继承，不
 | `log/discarded.jsonl` / `unjudged.jsonl` / `rolled_out.jsonl` / `runs.jsonl` | 丢弃留痕 / 超时未判 / 窗口滚动 / 每轮小结 |
 
 ## 可靠性修复计划
+
+发送确认只覆盖产卡清单中的 ID；分片缺失、文件变更或判定内容修订时拒绝提交，须重产卡并重新核查。
+同秒新增内容留到下一批。旧清单缺少记录覆盖范围时须重产，不猜测已发范围。
 
 逐项方案、验收和边界见 `references/reliability-plan.md`。重判更新有效流水并将旧值保留在
 `log/intel-revisions.jsonl`；已通报记录的文案更正不触发重发。
