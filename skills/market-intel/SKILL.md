@@ -241,6 +241,8 @@ python3 <技能目录>/scripts/pipeline.py --run     # 退出码: 0 正常 / 1 �
    要真正清空（不推荐）显式写 `"use_builtin_default": false`。
    **名单只在配置文件里改**，**不要改代码或本文档**；
    完整名单与口径见 `denylist.json` 与 `references/lead-criteria.md`「黑名单与轮次」段。
+   线索侧的过滤全链路（已实现部分 / 三个缺口 / 调研成本治理方案 A-E）见
+   `references/lead-filter-design.md`——改过滤逻辑或讨论「要不要调研某家公司」前先读它。
 2. **目标客群锁定**：只做天使轮 / Pre-A / A / B 轮的成长型出海团队。融资类规则组
    已加 `round_any` 白名单（`rules.json`），C 轮及以上不命中任何组。
 3. **重点抓的三类外显信号**（这三类是本技能独有的，细则只在本文档）：
