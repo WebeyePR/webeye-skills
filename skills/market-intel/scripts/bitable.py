@@ -382,6 +382,51 @@ def _extract_new_rid(d):
     return rid_list[0] if rid_list else None
 
 
+def record_field(record_id, field_name, cfg):
+    """按 record_id 读单个字段值（供产卡前判断「跟进状态」用）。
+
+    为什么不用 `_cli(["+record-get", ...])`：record-get 的输出是 **manifest**，
+    记录本身落在 cwd 下的 ndjson 文件里（2026-10-28 实测），直接 json.loads 拿不到
+    fields。这里按 manifest 的 record_file 读首行并取字段；工作目录用临时目录，
+    避免把 ndjson 落到技能 scripts/ 目录（历史踩过：导出文件遗留在仓库目录）。
+
+    返回字段的原始值（select 字段为单元素 list 时取第一项文本）；读不到返回 None。
+    任何异常由调用方兜底（产卡路径必须容错，不得因池查询失败阻断）。
+    """
+    import subprocess
+    import tempfile
+    workdir = tempfile.mkdtemp(prefix="mi-rg-")
+    try:
+        cmd = ["lark-cli", "base", "+record-get",
+               "--base-token", cfg["app_token"], "--table-id", cfg["table_id"],
+               "--record-id", record_id, "--as", cfg.get("identity", "user")]
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=workdir)
+        text = out.stdout or ""
+        meta = json.loads(text[text.find("{"):text.rfind("}") + 1])
+        path = meta.get("record_file")
+        if not path or not os.path.isfile(path):
+            return None
+        with open(path, "r", encoding="utf-8") as fh:
+            rec = json.loads(fh.readline())
+        fields = rec.get("fields", rec)
+        value = fields.get(field_name)
+        if isinstance(value, list) and value:
+            first = value[0]
+            return first.get("text") if isinstance(first, dict) else str(first)
+        return value
+    finally:
+        # 清理 ndjson 与临时目录（不留在技能目录，也不留垃圾）
+        try:
+            for name in os.listdir(workdir):
+                try:
+                    os.unlink(os.path.join(workdir, name))
+                except OSError:
+                    pass
+            os.rmdir(workdir)
+        except OSError:
+            pass
+
+
 def _search_company(name, cfg):
     """按公司名称检索是否已有记录（精确匹配校验，忽略大小写）。返回 record_id 或 None。"""
     # 使用已安装 CLI 的 offset 分页；预算耗尽不能当成查无此公司。

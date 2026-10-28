@@ -434,6 +434,11 @@ def warn_activity_highlights(intel, min_len=45):
     for r in intel:
         if r.get("discard") or not r.get("notify"):
             continue
+        # 只检查活动情报：activity 明细仅活动类记录才有语义，战略风向/技术战报等
+        # 类型没有 activity 字段是**正常形态**而非"缺失"（2026-10-28 实测误报：
+        # Genie 4 等非活动条目被点名"看点缺失"——检查范围写宽了）。
+        if r.get("type") != "活动情报":
+            continue
         a = r.get("activity") or {}
         hl = (a.get("highlight") or "").strip()
         if not hl or len(hl) < min_len:
@@ -620,11 +625,120 @@ def lead_exists(ld):
     return (ld or {}).get("bitable_status") == "exists"
 
 
+def _reconcile_pool_status(ws, entity_names):
+    """产卡前按公司名对飞书池查重，回填本地丢失的 bitable_status（陷阱 71）。
+
+    背景（2026-10-27 实测）：bitable_status 只由 --bitable --commit 写入层回写，
+    洁净重置/手工清理 leads.jsonl 后本地状态丢失，而飞书池记录还在——
+    卡片把昨天刚入池的公司当全新 P0 再推（写入层查重兜底不重复建行，
+    但卡面语义失真、且要等 commit 才发现）。
+
+    只查规则命中的候选（通常 ≤3 家，别处不调用，API 预算可控）；
+    lark-cli 不可用/网络失败时静默返回空（保持旧行为，不阻断产卡——
+    写入层 _search_company 仍是防重复建行的最终兜底）。
+    返回 {norm(公司名): {"record_id": …}}。
+    """
+    try:
+        import bitable as bitable_mod
+    except Exception:  # noqa: BLE001
+        return {}
+    cfg = (load_notify(ws).get("bitable") or {})
+    if not cfg.get("enabled"):
+        return {}
+    hits = {}
+    for name in entity_names:
+        if not name:
+            continue
+        try:
+            rid = bitable_mod._search_company(name, cfg)
+        except Exception:  # noqa: BLE001 — 网络/权限/CLI 缺失：静默降级，不阻断产卡
+            return hits
+        if rid:
+            hits[core.norm(name)] = {"record_id": rid}
+    if hits:
+        sys.stderr.write("[pool-reconcile] %d 家候选已在猎隼池，卡面将标「已存在」: %s\n"
+                         % (len(hits), "、".join(sorted(hits.keys()))))
+    return hits
+
+
 def lead_card_split(leads):
     """线索卡分流：(fresh, exists)。群卡 @ 只催 fresh；exists 只在私信卡中性标注带过。"""
     leads = list(leads or [])
     return ([l for l in leads if not lead_exists(l)],
             [l for l in leads if lead_exists(l)])
+
+
+# 「未开始跟进」的跟进状态集合：只有这些状态允许继续在卡上展示。
+# 池字段 options（references/bitable-fields.md）：未跟进/待跟进/GTM跟进中/已合作…
+# 语义：已有销售认领的线索对市场团队不再是行动项，重复展示=噪音，整条剔除。
+FOLLOWUP_OPEN_STATUS = ("", "未跟进")
+
+
+def _reconcile_digest_leads(ws, leads):
+    """产卡前对窗口内线索做池状态对齐 + 已跟进线索剔除（陷阱 74）。
+
+    为什么必须有这一道（2026-10-28 实测）：
+      `--input` 路径有四道拦截（本地 dedupe / 黑名单 / _reconcile_pool_status / notify 压制），
+      但 `--digest` 产卡走的是**另一条路径**——只做 in_window 过滤，不查池。
+      于是「锚点未推进期间（如洁净重置后一直未 commit）窗口内历史线索」会每轮重复进卡：
+      实测光启之境（10-27 落盘的 notify=true + exists 历史组合）连续多轮出现在内参里。
+
+    规则（两级，均为"命中即收敛"，失败一律保持原样不阻断产卡）：
+      ① 窗口内 notify=true 且**无** bitable_status 的线索 → 按公司名查池；
+         命中则回填 bitable_status=exists + record_id，并压 notify=False
+         （与 v0.6.15 的入池语义对齐，卡面走灰色「已登记」而非红色 P0）。
+      ② bitable_status=exists 且有 record_id 的线索 → 读池内「跟进状态」；
+         状态不属于 FOLLOWUP_OPEN_STATUS（即已有销售认领）→ **整条剔除**，
+         不再占用内参版面（用户 2026-10-28 明确要求）。
+
+    成本控制：只查窗口内线索（正常推进时通常 0~2 条），每条约 1.5s；
+    lark-cli 不可用/网络失败时静默跳过（保持旧行为）。
+    """
+    if not leads:
+        return leads
+    cfg = (load_notify(ws).get("bitable") or {})
+    if not cfg.get("enabled"):
+        return leads
+    try:
+        import bitable as bitable_mod
+    except Exception:  # noqa: BLE001
+        return leads
+
+    kept = []
+    reconciled = 0
+    dropped_followed = []
+    for ld in leads:
+        status = (ld.get("bitable_status") or "")
+        # ① 无池状态的新线索：查池回填（等价于 --input 路径第③道）
+        if ld.get("notify") and not status:
+            try:
+                rid = bitable_mod._search_company(ld.get("entity_name") or "", cfg)
+            except Exception:  # noqa: BLE001 —— 网络/权限/CLI 缺失：保持原样
+                kept.append(ld)
+                continue
+            if rid:
+                ld = dict(ld)
+                ld["bitable_status"] = "exists"
+                ld["bitable_record_id"] = rid
+                ld["notify"] = False
+                reconciled += 1
+        # ② 已在池的线索：读跟进状态，已被认领的整条剔除
+        if ld.get("bitable_status") == "exists" and ld.get("bitable_record_id"):
+            try:
+                follow = bitable_mod.record_field(ld["bitable_record_id"], "跟进状态", cfg)
+            except Exception:  # noqa: BLE001
+                follow = None
+            if follow is not None and follow not in FOLLOWUP_OPEN_STATUS:
+                dropped_followed.append("%s（%s）" % (ld.get("entity_name") or "?", follow))
+                continue
+        kept.append(ld)
+    if reconciled:
+        sys.stderr.write("[digest-reconcile] %d 条窗口内线索已在线索池，按「已存在」展示\n"
+                         % reconciled)
+    if dropped_followed:
+        sys.stderr.write("[digest-reconcile] %d 条线索已被销售认领（跟进状态非未跟进），"
+                         "不进入内参: %s\n" % (len(dropped_followed), "、".join(dropped_followed)))
+    return kept
 
 
 def _active(leads):
@@ -995,6 +1109,30 @@ def resolve_banner_key(ws, hero_image=None):
         digest = hashlib.sha1(open(src, "rb").read()).hexdigest()
         if digest in cache:
             return cache[digest]
+        # 非 ASCII 路径中转（2026-10-27 实测，陷阱 72）：lark-cli 对含中文等
+        # 非 ASCII 字符的 --file 路径直接报 "cannot open file"（与权限位无关，
+        # 文件真实存在也拒读）。与 URL 分支同策略：复制到 /tmp ASCII 临时名
+        # 再上传；上传结果按**内容 sha1** 缓存，与原路径名无关，同图不重传。
+        try:
+            src.encode("ascii")
+        except UnicodeEncodeError:
+            import shutil
+            import tempfile as _tf
+            suffix = os.path.splitext(src)[1] or ".png"
+            fd, ascii_tmp = _tf.mkstemp(suffix=suffix, prefix="mi-hero-", dir="/tmp")
+            os.close(fd)
+            try:
+                shutil.copyfile(src, ascii_tmp)
+                key = _upload_hero_image(ascii_tmp)
+            finally:
+                try:
+                    os.unlink(ascii_tmp)
+                except OSError:
+                    pass
+            if key:
+                cache[digest] = key
+                core.jdump(cache_path, cache)
+            return key
         key = _upload_hero_image(src)
         if key:
             cache[digest] = key
@@ -1607,7 +1745,18 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
     #    分级口径（需求文档）：任一 tier=P0 组命中即 P0（市场优先建联，实时通知）；
     #    仅 P1 组命中为 P1（入池+日报，不实时打扰，notify_p1 可放开）。
     new_leads = []
-    existing_keys = {l.get("dedupe_key") for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))}
+    all_leads_rows = core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))
+    existing_keys = {l.get("dedupe_key") for l in all_leads_rows}
+    # 池侧状态对齐（2026-10-27 实测缺口，陷阱 71）：本地 leads.jsonl 的
+    # bitable_status 是 --bitable --commit 写入层回写的，洁净重置/手工清理后
+    # 本地状态丢失，而飞书池里的记录还在——卡片渲染 lead_exists() 查本地
+    # 会把"昨天刚入池的公司"当全新 P0 再推一遍（池侧去重兜底不会重复建行，
+    # 但卡面语义失真：红色「P0 · 优先建联」实际早已在池）。修法：规则命中的
+    # 候选在产卡前按公司名对飞书池查重，命中即回填 bitable_status=exists +
+    # record_id，卡面走「已存在」灰色标注。只对规则命中的少数候选查（通常
+    # ≤3 家），不打 API 预算；查重失败（网络/权限）不阻断产卡，保持旧行为。
+    pool_hits = _reconcile_pool_status(ws, [t for t in sorted(touched)
+                                             if (facts_mod.load_fact(ws, t) or {}).get("name")])
     threshold = match_mod.threshold(rules)
     notify_p1 = bool((rules.get("scoring") or {}).get("notify_p1", False))
     # 绝对负向黑名单（2026-10-27 用户明令）：命中即硬丢弃——不落 leads.jsonl、
@@ -1630,11 +1779,13 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
             continue
         dedupe = core.sha1(eid + "|" + ",".join(sorted(result["matched_groups"])))
         priority = result.get("priority") or "P1"
+        name = fact.get("name") or eid
+        pool_hit = pool_hits.get(core.norm(name)) or {}
         lead = {
             "lead_id": core.sha1(eid + "|" + now)[:12],
             "dedupe_key": dedupe,
             "entity_id": eid,
-            "entity_name": fact.get("name") or eid,
+            "entity_name": name,
             "industries": fact.get("industries") or [],
             "priority": priority,
             "matched_groups": result["matched_groups"],
@@ -1650,10 +1801,17 @@ def cmd_input(ws, input_path, already_sent=None, dry_run=False, sent_before=None
             "status": "new",
             "logged_at": now,
         }
+        # 池侧回填（陷阱 71）：飞书池已存在的公司，卡面走「已存在」灰标注，
+        # 绝不再以红色全新 P0 面孔重复轰炸（已入池公司不是新潜在线索）。
+        if pool_hit.get("record_id"):
+            lead["bitable_status"] = "exists"
+            lead["bitable_record_id"] = pool_hit["record_id"]
+            # 已在池的公司不再触发通知（私信/群催建联语义只对全新线索成立）
+            lead["notify"] = False
         recent_cut = time.time() - 7 * 86400
         dup = dedupe in existing_keys and any(
             (core.parse_iso(l.get("logged_at")) or 0) > recent_cut
-            for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))
+            for l in all_leads_rows
             if l.get("dedupe_key") == dedupe)
         if dup:
             continue  # 7 天内已报过同组合线索：不重复打扰
@@ -1876,6 +2034,9 @@ def cmd_digest(ws, commit=False, hero_image=None):
     records = [r for r in records if not r.get("suppressed_by_guard")]
     leads = [l for l in core.read_jsonl(os.path.join(ws, "log", "leads.jsonl"))
              if delivery.in_window(l, "lead_id", anchor_rec)]
+    # 产卡前的最后一道池对齐 + 已跟进线索剔除（陷阱 74）：
+    # digest 路径此前没有池状态检查，历史线索（锚点未推进期间）会每轮重复进卡。
+    leads = _reconcile_digest_leads(ws, leads)
     # 连用陷阱代码化（2026-10-27 实测坑）：旧实现 --commit 分支提前 return，
     # 导致 --digest --commit 连用只推进锚点、摘要卡从未产出，且无任何提示——
     # 修复为「先产卡、后推进锚点」，连用语义变为产卡+推锚一步完成。
