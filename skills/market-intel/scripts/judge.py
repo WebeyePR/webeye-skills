@@ -2022,7 +2022,15 @@ def cmd_lead_card(ws):
 
 # ---------- 每日摘要（delta 锚点式，沿用 change-watch 的宁重勿漏） ----------
 
-def cmd_digest(ws, commit=False, hero_image=None):
+def cmd_digest(ws, commit=False, hero_image=None, publish=False, publish_target=None,
+               publish_dry=False, publish_runner=None):
+    """产内参卡；(commit) 推进锚点；(publish) 发送并按结果自动推锚。
+
+    `--publish` 的存在意义（2026-10-28 用户明令）：业务人员只触发、不懂也不该
+    手工跑 `--commit`。漏跑 commit 会让同一批内容在下一轮再推一遍，因此把
+    「发送成功 → 推锚」做成一个原子动作：全部目标/全部得分片都送达才确认，
+    任一片失败则保留清单、下次 `--publish` 续发（详见 publish.py 头部纪律）。
+    """
     now = core.now_iso()
     anchor_rec = core.jload(os.path.join(ws, "state", "digest_anchor.json"), {"anchor": None})
     anchor = anchor_rec.get("anchor")
@@ -2048,7 +2056,9 @@ def cmd_digest(ws, commit=False, hero_image=None):
     # 故 commit 时若存在待发送清单（说明本批卡已产出、可能已发出），直接复用其卡片路径，
     # 只推锚不重产；清单缺失（说明是「一步到位」用法）才按老行为连产带推。
     batch_prev = core.jload(os.path.join(ws, "state", "digest_pending_send.json"), None)
-    reuse = bool(commit and batch_prev and (batch_prev.get("cards") or []))
+    # publish 也走复用：上次发送中断留下的清单必须原样续发，不能重新产卡
+    # （重新产卡会改内容哈希 → 幂等键失效 → 已送达的分片被重复推送）。
+    reuse = bool((commit or publish) and batch_prev and (batch_prev.get("cards") or []))
     by_type = {}
     for r in records:
         by_type[r.get("type") or "未分类"] = by_type.get(r.get("type") or "未分类", 0) + 1
@@ -2110,13 +2120,39 @@ def cmd_digest(ws, commit=False, hero_image=None):
     if not reuse:
         batch_prev = delivery.manifest(list(paths), records, leads, anchor, now)
         core.jdump(batch, batch_prev)
+    if publish and not commit:
+        # 自动发送 + 按送达结果推锚：业务人员只触发，不需要也不应该手工 commit。
+        # 全部目标/全部分片送达 → 等价于「确认已送达」→ 立即 confirm 推锚；
+        # 任一片失败 → 不推锚、清单保留，下次 --publish 续发（幂等键保证不重发）。
+        import publish as publish_mod
+        try:
+            targets = publish_mod.resolve_targets(load_notify(ws), publish_target)
+        except ValueError as exc:
+            sys.stderr.write("[publish] 发送目标配置错误，未发送、未推锚: %s\n" % exc)
+            return 5
+        ok, batch_prev = publish_mod.send_batch(
+            ws, batch_prev, targets=targets, runner=publish_runner, dry_run=publish_dry)
+        if publish_dry:
+            print("[publish][dry-run] 沙箱预演完成，未真实发送、未推锚")
+            return 0
+        if not ok:
+            sys.stderr.write(
+                "[publish] 有分片未送达：锚点**未推进**、待发送清单已保留。\n"
+                "          修复后重跑 `judge.py --publish` 即续发（已送达分片会跳过，"
+                "幂等键防重复），无需重新产卡。\n")
+            return 5
+        commit = True  # 送达即确认
     if commit:
         new_anchor = delivery.confirm(ws, batch_prev, anchor_rec, now)
         print("摘要锚点已推进到: %s" % new_anchor)
-        print("[注意] 锚点已推进且本批记录已标记为「已通报」——若这张卡后续发送失败，"
-              "这批内容不会再次出现在下期内参里（防重发优先于防漏发）。"
-              "因此**正确顺序是：先 --digest 产卡 → 发送成功 → 再 --digest --commit**；"
-              "只有确认卡已送达时才可连用。")
+        if publish:
+            print("[publish] 发送已确认，锚点与「已通报」标记同步完成——"
+                  "本批内容不会在下一期内参重复出现。")
+        else:
+            print("[注意] 锚点已推进且本批记录已标记为「已通报」——若这张卡后续发送失败，"
+                  "这批内容不会再次出现在下期内参里（防重发优先于防漏发）。"
+                  "因此**正确顺序是：先 --digest 产卡 → 发送成功 → 再 --digest --commit**；"
+                  "只有确认卡已送达时才可连用。")
         try:
             os.remove(batch)  # 已发送并推锚：凭据完成使命
         except OSError:
@@ -2124,6 +2160,41 @@ def cmd_digest(ws, commit=False, hero_image=None):
     else:
         print("待发送清单已落盘: %s（共 %d 张，发送成功后跑 --digest --commit）"
               % (batch, len(paths)))
+    return 0
+
+
+def cmd_publish(ws, publish_target=None, publish_dry=False, publish_runner=None):
+    """续发既有待发送清单并推锚（`--publish` 不带 `--digest`）。
+
+    用途：上一次 `--digest --publish` 发送中途失败/进程被杀后，业务侧再触发一次
+    补偿即可——已送达的分片按幂等键跳过，只补发缺失部分，全部成功才推锚。
+    """
+    import publish as publish_mod
+    batch = publish_mod.load_batch(ws)
+    if not batch:
+        print("没有待发送批次：请先 `judge.py --digest --publish` 产卡并发送。")
+        return 0
+    try:
+        targets = publish_mod.resolve_targets(load_notify(ws), publish_target)
+    except ValueError as exc:
+        sys.stderr.write("[publish] 发送目标配置错误，未发送、未推锚: %s\n" % exc)
+        return 5
+    print("续发待发送清单: %s" % "、".join(os.path.basename(p) for p in batch.get("cards") or []))
+    ok, batch = publish_mod.send_batch(ws, batch, targets=targets,
+                                       runner=publish_runner, dry_run=publish_dry)
+    if publish_dry:
+        print("[publish][dry-run] 预演完成，未真实发送、未推锚")
+        return 0
+    if not ok:
+        sys.stderr.write("[publish] 仍有分片未送达：锚点未推进，清单保留，可再次重试。\n")
+        return 5
+    anchor_rec = core.jload(os.path.join(ws, "state", "digest_anchor.json"), {"anchor": None})
+    new_anchor = delivery.confirm(ws, batch, anchor_rec, core.now_iso())
+    print("摘要锚点已推进到: %s（补发完成，本批不会重复出现）" % new_anchor)
+    try:
+        os.remove(os.path.join(ws, "state", "digest_pending_send.json"))
+    except OSError:
+        pass
     return 0
 
 
@@ -2204,6 +2275,14 @@ def main():
                     help="沙箱预检：临时副本上完整演练 --input 流程并报告问题，真实工作区零写入")
     ap.add_argument("--digest", action="store_true", help="产出每日摘要卡（delta 窗口）")
     ap.add_argument("--commit", action="store_true", help="与 --digest 连用：推进摘要锚点")
+    ap.add_argument("--publish", action="store_true",
+                    help="发送内参卡并在全部送达后自动推锚（业务侧只触发、无需手工 commit）。"
+                         "与 --digest 连用=产卡+发送+推锚一步完成；单独使用=续发上次未送达的清单")
+    ap.add_argument("--publish-target",
+                    help="发送目标: user=本人私信(bot) | chat=群(user) | both=两者；"
+                         "缺省读 notify.json 的 digest.publish_target，再退 user")
+    ap.add_argument("--publish-dry-run", action="store_true",
+                    help="与 --publish 连用：只预演发送参数，不真实送达、不推锚")
     ap.add_argument("--hero-image",
                     help="内参自定义头图：本地图片路径（自动上传飞书换 image_key 并按文件"
                          "指纹缓存，≤10M、高:宽 ≤16:9）或现成 img_v3 key；"
@@ -2251,7 +2330,13 @@ def main():
         print("预览已写入 %s（共 %d 条）。确认无误后加 --commit 真正写入。" % (bitable.pending_path(ws), len(items)))
         raise SystemExit(0)
     if args.digest:
-        raise SystemExit(cmd_digest(ws, commit=args.commit, hero_image=args.hero_image))
+        raise SystemExit(cmd_digest(ws, commit=args.commit, hero_image=args.hero_image,
+                                    publish=args.publish,
+                                    publish_target=args.publish_target,
+                                    publish_dry=args.publish_dry_run))
+    if args.publish:
+        raise SystemExit(cmd_publish(ws, publish_target=args.publish_target,
+                                     publish_dry=args.publish_dry_run))
     if args.status_card:
         raise SystemExit(cmd_status(ws))
     if args.input:
