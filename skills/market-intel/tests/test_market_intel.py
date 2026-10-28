@@ -1735,6 +1735,139 @@ class TestEnrichDetail(unittest.TestCase):
         self.assertEqual(budget[0], 3, "无 enricher 的域名不消耗抓取配额")
         self.assertEqual(out["summary"], "")
 
+    def test_enrich_dead_event_marked(self):
+        """死活动识别（陷阱 73）：活动行对失效活动回首页（无 ivityJson）→ 标 enrich_dead。
+
+        实测：不存在 ID 9999999999999 与已下架活动返回同一首页（412540B），
+        重试永不可能成功，不得进入补抓清单。
+        """
+        # mock core.fetch 返回首页形态（无 ivityJson 的 HTML）
+        entry = {"title": "死活动", "link": "https://www.huodongxing.com/event/9999999999999",
+                 "published": None, "summary": "", "text": ""}
+        orig_fetch = core.fetch
+        try:
+            core.fetch = lambda url, timeout=30, retries=1: "<html><title>活动行，发现精彩城市生活</title></html>"
+            out = collect.enrich_detail({"config": {"detail_enrich": True}}, entry, {}, [5])
+        finally:
+            core.fetch = orig_fetch
+        self.assertTrue(out.get("enrich_dead"), "回首页（解析不到数据）的活动行页应标记为死活动")
+        self.assertFalse(out.get("enrich_retry"), "死活动不应标记为可重试")
+
+    def test_enrich_transient_failure_marked_retry(self):
+        """瞬时网络失败（超时/SSL 抖动）→ 标 enrich_retry，进入补抓清单。"""
+        entry = {"title": "活活动", "link": "https://www.huodongxing.com/event/9865517493800",
+                 "published": None, "summary": "", "text": ""}
+        orig_fetch = core.fetch
+        try:
+            def boom(url, timeout=30, retries=1):
+                raise TimeoutError("The read operation timed out")
+            core.fetch = boom
+            out = collect.enrich_detail({"config": {"detail_enrich": True}}, entry, {}, [5])
+        finally:
+            core.fetch = orig_fetch
+        self.assertTrue(out.get("enrich_retry"), "瞬时网络失败应标记可重试")
+        self.assertFalse(out.get("enrich_dead"), "网络失败不是死活动")
+
+    def test_enrich_timeout_independent_setting(self):
+        """富化超时独立参数 enrich_timeout_seconds（默认走 request_timeout_seconds）。"""
+        entry = {"title": "t", "link": "https://www.huodongxing.com/event/9865517493800",
+                 "published": None, "summary": "", "text": ""}
+        captured = {}
+        orig_fetch = core.fetch
+        try:
+            def spy(url, timeout=30, retries=1):
+                captured["timeout"] = timeout
+                raise TimeoutError("x")
+            core.fetch = spy
+            collect.enrich_detail({"config": {"detail_enrich": True}}, entry,
+                                  {"enrich_timeout_seconds": 8}, [5])
+            self.assertEqual(captured["timeout"], 8, "富化超时应读独立参数")
+        finally:
+            core.fetch = orig_fetch
+
+
+class TestEnrichRetryQueue(unittest.TestCase):
+    """富化补抓清单（陷阱 73 方案 A）：失败入队、死活动不入、补抓成功合并、48h 过期。"""
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        self.ws = tempfile.mkdtemp(prefix="mi-erq-")
+
+    def test_retry_enrichments_success_merges_result(self):
+        """补抓成功：结果写入清单 enriched_summary，失败清单清空。"""
+        pipeline.save_enrich_retry(self.ws, [
+            {"key": "https://www.huodongxing.com/event/9865517493800",
+             "link": "https://www.huodongxing.com/event/9865517493800",
+             "source_id": "huodongxing-explore", "title": "高交会",
+             "first_seen": "2026-10-28T10:00:00+08:00"}])
+        orig_fetch = core.fetch
+        try:
+            # 返回含 ivityJson 的真实形态页（Start/End 为活动行实际的 .NET /Date(ms)/ 格式）
+            core.fetch = lambda url, timeout=30, retries=1: (
+                'var ativityJson = {"Start":"/Date(1795654800000)/","End":"/Date(1795856400000)/",'
+                '"City":"深圳","Address":"深圳国际会展中心"};')
+            enriched = pipeline.retry_enrichments(self.ws, {}, "2026-10-28T12:00:00+08:00")
+        finally:
+            core.fetch = orig_fetch
+        self.assertEqual(len(enriched), 1, "成功条目应返回并留在清单")
+        self.assertIn("时间：", enriched[0]["enriched_summary"])
+        # 清单里仍有该条（带结果），不再有待重试条目
+        items = pipeline.load_enrich_retry(self.ws)
+        self.assertEqual([i.get("key") for i in items],
+                         ["https://www.huodongxing.com/event/9865517493800"])
+        self.assertNotIn("enrich_retry", items[0])
+
+    def test_retry_dead_event_dropped(self):
+        """死活动（回首页）：补抓一次即从清单剔除，不再占用预算。"""
+        pipeline.save_enrich_retry(self.ws, [
+            {"key": "https://www.huodongxing.com/event/9999999999999",
+             "link": "https://www.huodongxing.com/event/9999999999999",
+             "source_id": "huodongxing-explore", "title": "死活动",
+             "first_seen": "2026-10-28T10:00:00+08:00"}])
+        orig_fetch = core.fetch
+        try:
+            core.fetch = lambda url, timeout=30, retries=1: "<html><title>活动行首页</title></html>"
+            enriched = pipeline.retry_enrichments(self.ws, {}, "2026-10-28T12:00:00+08:00")
+        finally:
+            core.fetch = orig_fetch
+        self.assertEqual(enriched, [], "死活动无补抓结果")
+        self.assertEqual(pipeline.load_enrich_retry(self.ws), [], "死活动应被移出清单")
+
+    def test_retry_expired_dropped(self):
+        """清单条目 48h 过期即弃（死活动/过期活动不值得再抓）。"""
+        pipeline.save_enrich_retry(self.ws, [
+            {"key": "k1", "link": "https://www.huodongxing.com/event/1",
+             "source_id": "huodongxing-explore", "title": "旧",
+             "first_seen": "2026-10-25T00:00:00+08:00"}])
+        orig_fetch = core.fetch
+        try:
+            core.fetch = lambda url, timeout=30, retries=1: (_ for _ in ()).throw(
+                AssertionError("过期条目不应发起网络请求"))
+            enriched = pipeline.retry_enrichments(self.ws, {}, "2026-10-28T12:00:00+08:00")
+        finally:
+            core.fetch = orig_fetch
+        self.assertEqual(enriched, [])
+        self.assertEqual(pipeline.load_enrich_retry(self.ws), [])
+
+    def test_apply_enriched_merges_into_same_key_added(self):
+        """补抓结果按 key 合并进本轮同名 added 变更；不同 key 不动。"""
+        changes = [
+            {"change_kind": "added", "key": "https://x/1", "summary": "RSS摘要"},
+            {"change_kind": "added", "key": "https://x/2", "summary": "别的"},
+            {"change_kind": "removed", "key": "https://x/1", "summary": "r"},
+        ]
+        pipeline._apply_enriched_to_changes(
+            [{"key": "https://x/1", "enriched_summary": "时间：…"}], changes)
+        self.assertIn("时间：", changes[0]["summary"], "同 key added 应合并富化文本")
+        self.assertIn("RSS摘要", changes[0]["summary"], "原摘要保留在富化文本之后")
+        self.assertEqual(changes[1]["summary"], "别的", "不同 key 不动")
+        self.assertEqual(changes[2]["summary"], "r", "removed 不动")
+
+    def test_empty_retry_list_noop(self):
+        """清单为空时零动作（不打网络、不写文件）。"""
+        enriched = pipeline.retry_enrichments(self.ws, {}, "2026-10-28T12:00:00+08:00")
+        self.assertEqual(enriched, [])
+
 
 class TestLeadsLatestCarryOver(unittest.TestCase):
     """leads-latest 防覆盖：未入池线索跨轮保留，不因下一轮判断静默丢失。"""
@@ -3377,6 +3510,130 @@ class TestNoBoilerplateSummary(unittest.TestCase):
                  "title": "某归档活动", "activity": {"name": "x", "time": "t", "location": "l",
                                                      "highlight": "短"}}]
         self.assertEqual(judge.warn_activity_highlights(recs), 0)
+
+
+class TestPoolReconcile(unittest.TestCase):
+    """池侧状态对齐（v0.6.15，陷阱 71）：本地 bitable_status 丢失时不再把
+    已入池公司当全新 P0 推送。"""
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+
+    def test_pool_hit_marks_exists_and_mutes_notify(self):
+        """池命中回填 exists + record_id，且 notify 压 False（已入池不再催建联）。"""
+        # 模拟 cmd_input 线索构建段对 pool_hit 的处理逻辑（与实现同构的最小复现）
+        pool_hit = {"record_id": "recTEST123"}
+        lead = {"entity_name": "光启之境", "priority": "P0", "notify": True,
+                "score": 110, "status": "new"}
+        if pool_hit.get("record_id"):
+            lead["bitable_status"] = "exists"
+            lead["bitable_record_id"] = pool_hit["record_id"]
+            lead["notify"] = False
+        self.assertEqual(lead["bitable_status"], "exists")
+        self.assertEqual(lead["bitable_record_id"], "recTEST123")
+        self.assertFalse(lead["notify"], "已入池公司不得再触发通知")
+        self.assertTrue(judge.lead_exists(lead), "lead_exists 应识别回填后的状态")
+
+    def test_no_pool_hit_keeps_fresh_semantics(self):
+        """池未命中（空 dict）保持全新线索语义，不加 exists 不压 notify。"""
+        pool_hit = {}
+        lead = {"entity_name": "某新公司", "priority": "P0", "notify": True, "status": "new"}
+        if pool_hit.get("record_id"):
+            lead["bitable_status"] = "exists"
+            lead["notify"] = False
+        self.assertNotIn("bitable_status", lead)
+        self.assertTrue(lead["notify"])
+        self.assertFalse(judge.lead_exists(lead))
+
+    def test_reconcile_disabled_bitable_returns_empty(self):
+        """bitable.enabled=false 时 _reconcile_pool_status 直接空返回（不打 API）。"""
+        ws = tempfile.mkdtemp(prefix="mi-rc-")
+        core.jdump(os.path.join(ws, "notify.json"),
+                   {"notify": {}, "bitable": {"enabled": False}})
+        self.assertEqual(judge._reconcile_pool_status(ws, ["某公司"]), {})
+
+    def test_reconcile_silent_on_cli_failure(self):
+        """lark-cli 不可用（_search_company 抛错）时静默空返回，不阻断产卡。"""
+        ws = tempfile.mkdtemp(prefix="mi-rc2-")
+        core.jdump(os.path.join(ws, "notify.json"),
+                   {"notify": {}, "bitable": {"enabled": True, "app_token": "x", "table_id": "x"}})
+        import bitable as b
+        orig = b._search_company
+        try:
+            b._search_company = lambda name, cfg: (_ for _ in ()).throw(RuntimeError("cli missing"))
+            self.assertEqual(judge._reconcile_pool_status(ws, ["某公司"]), {})
+        finally:
+            b._search_company = orig
+
+
+class TestDigestLeadReconcile(unittest.TestCase):
+    """产卡前线索池对齐与已跟进剔除（v0.6.17，陷阱 74）。
+
+    实测背景：digest 路径此前只做 in_window 过滤，不查池——锚点未推进期间
+    窗口内的历史线索（notify=true+exists）每轮重复进卡（光启之境连续多轮）。
+    """
+
+    def setUp(self):
+        sys.path.insert(0, core.SCRIPT_DIR)
+        self.ws = tempfile.mkdtemp(prefix="mi-dlr-")
+        core.jdump(os.path.join(self.ws, "notify.json"),
+                   {"notify": {}, "bitable": {"enabled": True, "app_token": "x",
+                                              "table_id": "y", "identity": "user"}})
+        import bitable
+        self.bitable = bitable
+        self._orig_search = bitable._search_company
+        self._orig_field = bitable.record_field
+
+    def tearDown(self):
+        self.bitable._search_company = self._orig_search
+        self.bitable.record_field = self._orig_field
+
+    def test_unpooled_lead_hits_pool_becomes_exists(self):
+        """无池状态的 notify 线索命中池 → 回填 exists 并压 notify（卡面走灰标）。"""
+        self.bitable._search_company = lambda name, cfg: "recHIT"
+        leads = [{"entity_name": "某公司", "notify": True, "bitable_status": None}]
+        out = judge._reconcile_digest_leads(self.ws, leads)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["bitable_status"], "exists")
+        self.assertEqual(out[0]["bitable_record_id"], "recHIT")
+        self.assertFalse(out[0]["notify"], "已入池线索不得再触发通知")
+
+    def test_followed_lead_dropped_from_card(self):
+        """已在池且跟进状态非「未跟进」→ 整条剔除（已有销售认领，不再是行动项）。"""
+        self.bitable.record_field = lambda rid, field, cfg: "GTM跟进中"
+        leads = [{"entity_name": "已认领公司", "notify": False,
+                  "bitable_status": "exists", "bitable_record_id": "recA"}]
+        out = judge._reconcile_digest_leads(self.ws, leads)
+        self.assertEqual(out, [], "已跟进线索必须从内参剔除")
+
+    def test_open_followup_lead_kept(self):
+        """跟进状态仍为「未跟进」→ 保留（未认领，团队仍需知晓）。"""
+        self.bitable.record_field = lambda rid, field, cfg: "未跟进"
+        leads = [{"entity_name": "在池未认领", "notify": False,
+                  "bitable_status": "exists", "bitable_record_id": "recB"}]
+        out = judge._reconcile_digest_leads(self.ws, leads)
+        self.assertEqual(len(out), 1, "未认领的在池线索应保留灰标展示")
+
+    def test_api_failure_keeps_lead_unchanged(self):
+        """池查询失败（CLI/网络）→ 保持原样，绝不因对齐失败阻断产卡。"""
+        def boom(*a, **k):
+            raise RuntimeError("cli missing")
+        self.bitable._search_company = boom
+        self.bitable.record_field = boom
+        leads = [{"entity_name": "某新公司", "notify": True, "bitable_status": None},
+                 {"entity_name": "某在池公司", "notify": False,
+                  "bitable_status": "exists", "bitable_record_id": "recC"}]
+        out = judge._reconcile_digest_leads(self.ws, leads)
+        self.assertEqual(len(out), 2, "查询失败时线索原样保留")
+
+    def test_bitable_disabled_noop(self):
+        """bitable 未启用 → 零动作（不打 API）。"""
+        core.jdump(os.path.join(self.ws, "notify.json"),
+                   {"notify": {}, "bitable": {"enabled": False}})
+        self.bitable._search_company = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("未启用时不该查池"))
+        leads = [{"entity_name": "某公司", "notify": True, "bitable_status": None}]
+        self.assertEqual(len(judge._reconcile_digest_leads(self.ws, leads)), 1)
 
 
 class TestSourceNameNoSuffix(unittest.TestCase):
