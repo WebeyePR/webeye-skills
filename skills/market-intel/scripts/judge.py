@@ -97,6 +97,32 @@ def _conv_variants(values):
     return out
 
 
+_NUM_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _claim_numbers(text):
+    """抽取「数值主张」：剔除紧邻 ASCII 字母的短数字片段（那是标识符，不是数量）。
+
+    2026-10-28 实测（第二次同类假阳性）：裸正则 `\\d+(?:\\.\\d+)?` 把 `2026Q3` 的 3、
+    `3C` 的 3、`5G` 的 5、`4K` 的 4 都当成独立数字，于是 grounding 对「季度/品类/
+    网络制式/清晰度」缩写反复误报。**假阳性会训练人忽略告警，比漏报更危险**，故收窄口径：
+      - 只排除「整数部分 ≤2 位且紧邻 ASCII 字母」的片段（Q3 / 3C / 5G / 4K / B2B / 5.5G）；
+      - 中文单位不是 ASCII 字母，`5亿元`、`17%`、`250亿澳元`、`3万` 照常核对；
+      - 三位以上数字不排除：`H200` 的 200、`1050` 这类型号/金额写错必须仍被抓到。
+    注意：`src_nums` 仍用宽松抽取（原文是证据全集），只有 probe 这一侧收窄。
+    """
+    out = []
+    for m in _NUM_TOKEN_RE.finditer(text):
+        s = m.group(0)
+        prev = text[m.start() - 1] if m.start() > 0 else ""
+        nxt = text[m.end()] if m.end() < len(text) else ""
+        glued = ((prev.isascii() and prev.isalpha()) or (nxt.isascii() and nxt.isalpha()))
+        if glued and len(s.split(".")[0]) <= 2:
+            continue
+        out.append(s)
+    return out
+
+
 def grounding_check(rec, change):
     """title/summary 里的数字串应出现在该变更的原文（title+summary）里。
 
@@ -121,7 +147,7 @@ def grounding_check(rec, change):
     declared = rec.get("number_notes") or {}
     variants = _conv_variants({float(x) for x in src_nums})
     grounded_notes, unverified = {}, []
-    for n in set(re.findall(r"\d+(?:\.\d+)?", probe)) - src_nums:
+    for n in set(_claim_numbers(probe)) - src_nums:
         if n in declared:
             grounded_notes[n] = str(declared[n])
         elif _near(n, variants):
