@@ -3666,5 +3666,157 @@ def _mk_out(ws):
     return os.path.join(ws, "out", "leads-latest.json")
 
 
+class TestPublish(unittest.TestCase):
+    """`--publish`：发送成功才推锚（业务侧只触发、不手工 commit）。
+
+    核心不变量：
+    ① 全部分片送达 → 自动推锚 + 删清单（下次不重复）；
+    ② 任一分片失败 → 不推锚、清单保留、已送达分片记账（可续发不重发）；
+    ③ 幂等键随内容变化，重试同一张卡不会产生第二条消息。
+    """
+
+    def setUp(self):
+        self.ws = tempfile.mkdtemp(prefix="mi-pub-")
+        os.makedirs(os.path.join(self.ws, "out"), exist_ok=True)
+        os.makedirs(os.path.join(self.ws, "log"), exist_ok=True)
+        core.jdump(os.path.join(self.ws, "notify.json"), {
+            "notify": {"user_id": "ou_test", "chat_id": "oc_test"},
+            "digest": {"enabled": True},
+        })
+        import publish as publish_mod
+        import delivery
+        self.publish = publish_mod
+        self.delivery = delivery
+        self.cards = []
+        for i in (1, 2):
+            p = os.path.join(self.ws, "out", "card-%d.json" % i)
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump({"header": {"title": {"content": "t%d" % i}}}, fh)
+            self.cards.append(p)
+
+    def _batch(self):
+        return {"version": 2, "created_at": "2026-10-28T20:00:00+08:00",
+                "anchor_before": None, "cards": list(self.cards), "card_count": 2,
+                "committed": False,
+                "card_hashes": {p: self.delivery.file_hash(p) for p in self.cards},
+                "record_ids": ["r1"], "lead_ids": [],
+                "record_hashes": {}, "lead_hashes": {}}
+
+    @staticmethod
+    def _ok_runner(argv, payload, timeout):
+        return 0, json.dumps({"ok": True, "data": {"message_id": "om_ok"}}), ""
+
+    @staticmethod
+    def _fail_runner(argv, payload, timeout):
+        return 0, json.dumps({"ok": False, "error": "chat not found"}), ""
+
+    def test_resolve_targets_default_and_expansion(self):
+        f = self.publish.resolve_targets
+        self.assertEqual(f({"digest": {}}), ["user"], "缺省只发本人私信，绝不默认群发")
+        self.assertEqual(f({"digest": {"publish_target": "both"}}), ["user", "chat"],
+                         "both 按「先私信、后群」顺序展开")
+        with self.assertRaises(ValueError):
+            f({"digest": {}}, "group")
+
+    def test_idempotency_key_tracks_content_and_target(self):
+        p = self.cards[0]
+        k1 = self.publish.idempotency_key(p, "user")
+        self.assertEqual(k1, self.publish.idempotency_key(p, "user"), "同内容同目标键必须稳定")
+        self.assertNotEqual(k1, self.publish.idempotency_key(p, "chat"), "换目标必须是不同键")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"header": {"title": {"content": "changed"}}}, fh)
+        self.assertNotEqual(k1, self.publish.idempotency_key(p, "user"),
+                            "内容变了要允许作为新消息发出")
+
+    def test_build_argv_identity_and_missing_target(self):
+        cfg = core.jload(os.path.join(self.ws, "notify.json"), {})
+        argv = self.publish.build_argv("user", cfg, self.cards[0])
+        self.assertIn("--as", argv)
+        self.assertEqual(argv[argv.index("--as") + 1], "bot", "私信一律 bot 身份")
+        argv = self.publish.build_argv("chat", cfg, self.cards[0])
+        self.assertEqual(argv[argv.index("--as") + 1], "user", "群卡一律 user 身份")
+        with self.assertRaises(ValueError):
+            self.publish.build_argv("user", {"notify": {}}, self.cards[0])
+
+    def test_all_shards_delivered_records_message_ids(self):
+        batch = self._batch()
+        ok, out = self.publish.send_batch(self.ws, batch, runner=self._ok_runner,
+                                          echo=lambda *_: None)
+        self.assertTrue(ok)
+        sent = out["publish"]["sent"]
+        self.assertEqual(len(sent), 2, "两片都要有回执")
+        self.assertTrue(all(v.get("message_id") == "om_ok" for v in sent.values()))
+        saved = core.jload(os.path.join(self.ws, "state", "digest_pending_send.json"), {})
+        self.assertEqual(len((saved.get("publish") or {}).get("sent") or {}), 2,
+                         "回执必须逐片落盘（进程中途退出可续发）")
+
+    def test_partial_failure_keeps_batch_and_blocks_commit(self):
+        calls = {"n": 0}
+
+        def runner(argv, payload, timeout):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                return 0, json.dumps({"ok": False, "error": "boom"}), ""
+            return 0, json.dumps({"ok": True, "data": {"message_id": "om_1"}}), ""
+
+        batch = self._batch()
+        ok, out = self.publish.send_batch(self.ws, batch, runner=runner, echo=lambda *_: None)
+        self.assertFalse(ok, "有分片失败就不能视为送达")
+        sent = out["publish"]["sent"]
+        self.assertEqual(len(sent), 1, "只记账已送达的那片")
+
+    def test_resume_skips_delivered_shard(self):
+        state = {"n": 0}
+
+        def runner(argv, payload, timeout):
+            state["n"] += 1
+            return 0, json.dumps({"ok": True, "data": {"message_id": "om_x"}}), ""
+
+        batch = self._batch()
+        self.publish.send_batch(self.ws, batch, runner=runner, echo=lambda *_: None)
+        self.assertEqual(state["n"], 2)
+        again = self.publish.load_batch(self.ws)
+        state["n"] = 0
+        ok, _ = self.publish.send_batch(self.ws, again, runner=runner, echo=lambda *_: None)
+        self.assertTrue(ok)
+        self.assertEqual(state["n"], 0, "已送达分片必须跳过，不得重复发送")
+
+    def _seed_window(self):
+        with open(os.path.join(self.ws, "log", "intel.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"change_id": "r1", "logged_at": "2026-10-28T20:00:00+08:00",
+                                 "type": "战略风向", "title": "t", "summary": "s",
+                                 "notify": True, "sources": []}, ensure_ascii=False) + "\n")
+        with open(os.path.join(self.ws, "log", "leads.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write("")
+
+    def test_digest_publish_advances_anchor_without_manual_commit(self):
+        self._seed_window()
+        rc = judge.cmd_digest(self.ws, publish=True, publish_runner=self._ok_runner)
+        self.assertEqual(rc, 0)
+        anchor = core.jload(os.path.join(self.ws, "state", "digest_anchor.json"), {}).get("anchor")
+        self.assertEqual(anchor, "2026-10-28T20:00:00+08:00", "送达即推锚，业务侧无需手工 commit")
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "state", "digest_pending_send.json")),
+                         "推锚后清单必须清理，否则下次会误判为待发")
+        rows = core.read_jsonl(os.path.join(self.ws, "log", "intel.jsonl"))
+        self.assertTrue(rows[0].get("suppressed_by_guard"), "已送达记录必须打已通报标记")
+
+    def test_digest_publish_failure_does_not_advance_anchor(self):
+        self._seed_window()
+        rc = judge.cmd_digest(self.ws, publish=True, publish_runner=self._fail_runner)
+        self.assertEqual(rc, 5, "发送失败必须以非零退出，绝不静默当成功")
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "state", "digest_anchor.json")),
+                         "发送失败不得推锚（否则内容永久丢失）")
+        self.assertTrue(os.path.exists(os.path.join(self.ws, "state", "digest_pending_send.json")),
+                        "清单必须保留，供下次续发")
+
+    def test_publish_dry_run_sends_nothing_and_keeps_anchor(self):
+        self._seed_window()
+        rc = judge.cmd_digest(self.ws, publish=True, publish_dry=True,
+                              publish_runner=self._ok_runner)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "state", "digest_anchor.json")),
+                         "dry-run 不推锚")
+
+
 if __name__ == "__main__":
     unittest.main()
