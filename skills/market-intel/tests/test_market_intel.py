@@ -213,6 +213,42 @@ class TestGrounding(unittest.TestCase):
         unverified, notes = judge.grounding_check(rec, None)
         self.assertEqual((unverified, notes), ([], {}))
 
+    # ---- 标识符缩写不得当数值主张（2026-10-28 第二次同类假阳性，陷阱 76） ----
+    def test_identifier_suffix_not_flagged(self):
+        """Q3 / 5G / 3C / 4K / B2B / 5.5G：短数字紧邻 ASCII 字母 = 标识符，不该核对。"""
+        for probe in ("2026Q3 线上消费 250 亿澳元", "5G 用户持续扩大", "覆盖 3C 数码",
+                      "采用 4K 影像", "以 B2B 平台为主", "5.5G 商用提速"):
+            with self.subTest(probe=probe):
+                change = {"title": "", "summary": "线上消费 250 亿澳元"}
+                if "Q3" in probe:
+                    change["summary"] = "2026年7至9月线上消费总额250亿澳元"
+                unverified, _ = judge.grounding_check({"summary": probe}, change)
+                self.assertEqual(unverified, [], "标识符缩写不该触发数值核对: %s" % probe)
+
+    def test_year_still_checked_when_absent(self):
+        """Q3 被排除，但同一片段里的年份仍是数值主张：原文没有 2026 就要报。"""
+        unverified, _ = judge.grounding_check(
+            {"summary": "2026Q3 线上消费 250 亿澳元"},
+            {"title": "", "summary": "第三季度线上消费 250 亿澳元"})
+        self.assertEqual(unverified, ["2026"], "排除缩写≠放过同年份，防止修正过度")
+
+    def test_long_numbers_still_blocked_when_glued(self):
+        """三位以上数字即便紧邻字母也要核对：型号 H200 ≠ H100 必须拦（防止修正过度）。"""
+        unverified, _ = judge.grounding_check(
+            {"summary": "算力达 H200 水平"}, {"title": "", "summary": "单卡吞吐达 H100 水平"})
+        self.assertEqual(unverified, ["200"])
+
+    def test_chinese_unit_short_number_still_blocked(self):
+        """短数字后接中文单位（亿/万/%）不受缩写豁免影响：金额/数量写错仍要拦。"""
+        cases = [("营收 5 亿元", "营收 4 亿元", ["5"]),
+                 ("同比增长 17%", "同比增长 11%", ["17"]),
+                 ("出货 3 万台", "出货 2 万台", ["3"])]
+        for probe, src, expect in cases:
+            with self.subTest(probe=probe):
+                unverified, _ = judge.grounding_check(
+                    {"summary": probe}, {"title": "", "summary": src})
+                self.assertEqual(unverified, expect)
+
 
 class TestEntity(unittest.TestCase):
     ENT = {"moonshot": {"name": "月之暗面", "aliases": ["Kimi", "Moonshot"], "industries": ["AI"]}}
