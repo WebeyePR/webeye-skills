@@ -10,7 +10,8 @@
  "digest": {
   "enabled": true,
   "template": "briefing",
-  "_comment": "每日内参卡：template=briefing 为需求文档四段式版式（活动日历/行业重点新闻/榜单监控/潜在客户与业务情报，indigo 头图；空段不占位）；渲染失败自动降级 simple 版式（宁重勿漏）。delta 锚点式：每天固定时刻跑 judge.py --digest，发送成功后跑 --digest --commit 推进锚点。"
+  "_comment": "每日内参卡：template=briefing 为需求文档四段式版式（活动日历/行业重点新闻/榜单监控/潜在客户与业务情报，indigo 头图；空段不占位）；渲染失败自动降级 simple 版式（宁重勿漏）。delta 锚点式：跑 judge.py --digest --publish 一条命令完成「产卡→发送→推锚」——发送成功才推锚，业务侧只需触发、无需手工 commit；发送失败不推锚、清单保留，重跑 judge.py --publish 即续发（已送达分片跳过，幂等键防重发）。publish_target: user=本人私信(bot) | chat=群(user) | both=两者；缺省 user。",
+  "publish_target": "user"
  },
  "bitable": {
   "enabled": false,
