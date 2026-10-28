@@ -238,6 +238,15 @@ class TestGrounding(unittest.TestCase):
             {"summary": "算力达 H200 水平"}, {"title": "", "summary": "单卡吞吐达 H100 水平"})
         self.assertEqual(unverified, ["200"])
 
+    def test_documented_blind_spot_magnitude_suffix(self):
+        """已知盲区固化（2026-10-29 实测量化后接受）：29B / 1.54M 这类「短数字+量级字母」
+        会被当标识符跳过。probe 侧 114 条中量级写法出现 0 次，故不改规则；一旦将来摘要
+        改用 M/B 写法，这条用例会提醒维护者重新评估（而不是以为它一直被核对）。
+        """
+        unverified, _ = judge.grounding_check(
+            {"summary": "开源 29B 参数模型"}, {"title": "", "summary": "开源 32B 参数模型"})
+        self.assertEqual(unverified, [], "已知盲区：量级缩写不参与核对（接受现状）")
+
     def test_chinese_unit_short_number_still_blocked(self):
         """短数字后接中文单位（亿/万/%）不受缩写豁免影响：金额/数量写错仍要拦。"""
         cases = [("营收 5 亿元", "营收 4 亿元", ["5"]),
