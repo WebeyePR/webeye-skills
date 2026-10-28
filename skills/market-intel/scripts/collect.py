@@ -295,6 +295,19 @@ def enrich_detail(spec, entry, settings, budget):
     """对单条 added 条目做详情页富化（spec.config.detail_enrich: true 时由管线调用）。
 
     budget: 剩余抓取配额列表 [n]（可变共享，单轮上限防超时）；失败静默返回原条目。
+
+    失败分类（2026-10-28 实测定性，陷阱 73）：详情页抓取失败有三类，处理不同——
+      - **死活动**：活动行对已下架/失效活动返回首页（412KB 首页、无 ivityJson，
+        与不存在 ID 的响应完全一致）→ 重试永不可能成功，条目标 `enrich_dead=true`，
+        管线不再重试；
+      - **瞬时网络失败**（超时/SSL 抖动/瞬时限流）→ 条目标 `enrich_retry=true`，
+        由管线记入补抓清单下轮重试（实测补抓成功率 3/4）；
+      - **无富化器/预算耗尽** → 原样返回，无标记（与"无需富化"同义）。
+
+    超时独立参数 `enrich_timeout_seconds`（默认 8s）：详情页正常 0.3~3s，
+    沿用源采集的 30s 会让单次瞬时抖动拖长整轮（实测 18s 级长尾）。
+    富化器就地修改 entry（历史行为，summary/published 被更新）——调用方
+    pipeline 用副本承接，快照污染问题独立处理（见 pipeline enrich 循环注释）。
     """
     host = urlparse(entry.get("link") or "").netloc.replace("www.", "")
     fn = _ENRICHERS.get(host)
@@ -302,11 +315,19 @@ def enrich_detail(spec, entry, settings, budget):
         return entry
     budget[0] -= 1
     try:
-        timeout = int(settings.get("request_timeout_seconds", 30))
+        timeout = int(settings.get("enrich_timeout_seconds",
+                                   settings.get("request_timeout_seconds", 30)))
         body = core.fetch(entry["link"], timeout=timeout, retries=0)
-        return fn(entry, body)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 —— 瞬时网络失败：标记可重试
+        entry["enrich_retry"] = True
         return entry
+    out = fn(entry, body)
+    # 死活动识别：解析器没拿到数据且响应是首页形态 → 该活动已下架/失效，
+    # 活动行对这类 URL 统一回首页（与不存在 ID 同响应，2026-10-28 实测）。
+    # 只对"本来应该有 ivityJson 的活动行页"判死，避免误伤其他站点富化器。
+    if out is entry and not entry.get("summary") and host == "huodongxing.com":
+        entry["enrich_dead"] = True
+    return out
 
 
 # ---------- 适配器注册表 ----------

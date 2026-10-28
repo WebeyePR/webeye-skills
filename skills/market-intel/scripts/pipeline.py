@@ -104,11 +104,85 @@ def acquire_lock(ws):
     return fh
 
 
+def enrich_retry_path(ws):
+    """富化补抓清单路径（state/enrich_retry.json）。"""
+    return os.path.join(ws, "state", "enrich_retry.json")
+
+
+def load_enrich_retry(ws):
+    """读补抓清单：[{key, link, source_id, first_seen}]。"""
+    return core.jload(enrich_retry_path(ws), [])
+
+
+def save_enrich_retry(ws, items):
+    core.jdump(enrich_retry_path(ws), items)
+
+
+def retry_enrichments(ws, settings, now):
+    """对上轮富化失败的条目补抓一轮（陷阱 73 方案 A）。
+
+    背景（2026-10-28 实测）：活动详情页富化失败的主因是**瞬时网络抖动**——
+    同一 URL 下轮抓取实测 3/4 成功（AIGC 峰会/高交会/大湾区直播全恢复）。
+    富化只影响展示质量（时间/地点/报名规模），失败条目原样进快照后不再 added，
+    若不主动补抓就永远不会带详情。
+
+    语义与边界（控制影响面）：
+    - 清单条目 48h 过期（与活动情报时效对齐，过期即弃——死活动/过期活动不值得再抓）；
+    - **死活动**（`enrich_dead`，回首页特征）**不入清单**——重试永不可能成功；
+    - 每轮每条最多补抓一次，成功后从清单移除；
+    - 补抓**成功**的条目**不重放为变更**（重放会打扰已判定内容），而是把富化结果
+      直接合并进**本轮同 key 的 added 变更**（若同轮恰好又出现）；若本轮无同名
+      added 变更，则把富化结果写回已落盘的 intel 记录供下次判定/展示参考——
+      实现上最稳的是：只更新快照 entry 的 summary（下轮 removed 时带上详情）+
+      把富化文本存清单条目 `enriched_summary` 字段，由 judge 侧展示时合并。为
+      控制边界，本函数只负责「补抓 + 更新清单」，不做变更重放。
+    """
+    items = load_enrich_retry(ws)
+    if not items:
+        return []
+    alive, still_failed, enriched = [], [], []
+    for it in items:
+        age = core.hours_since(it.get("first_seen"), now=core.parse_iso(now) or None)
+        if age is not None and age > 48:
+            continue  # 过期即弃
+        entry = {"key": it.get("key"), "title": it.get("title") or "",
+                 "link": it.get("link") or "", "published": None, "summary": ""}
+        spec = {"id": it.get("source_id") or "huodongxing-explore",
+                "config": {"detail_enrich": True}}
+        budget = [1]
+        out = collect.enrich_detail(spec, entry, settings, budget)
+        if out.get("enrich_dead"):
+            continue  # 死活动：弃
+        if out.get("enrich_retry"):
+            still_failed.append(it)  # 仍失败：下轮再试
+            continue
+        it["enriched_summary"] = out.get("summary") or ""
+        it["enriched_at"] = now
+        enriched.append(it)  # 成功：留在清单（带结果），本轮由管线合并进变更
+    save_enrich_retry(ws, still_failed + enriched)
+    return enriched
+
+
+def _apply_enriched_to_changes(enriched, all_changes):
+    """把补抓成功的富化文本合并进本轮同名 added 变更（同 key 才合并，不重放）。"""
+    if not enriched:
+        return
+    by_key = {e.get("key"): e.get("enriched_summary") for e in enriched if e.get("key")}
+    for c in all_changes:
+        if (c.get("change_kind") == "added" and c.get("key") in by_key
+                and by_key[c.get("key")]):
+            old = c.get("summary") or ""
+            c["summary"] = "\n".join([by_key[c["key"]]] + ([old] if old else []))
+
+
 def run_round(ws, baseline=False):
     now = core.now_iso()
     sources, settings = load_sources(ws)
     lock = acquire_lock(ws)
     try:
+        # 上轮富化失败条目的补抓（陷阱 73 方案 A）：先补抓、后采集，
+        # 补抓成功的结果在本轮 diff 后按 key 合并进同名 added 变更。
+        enriched = retry_enrichments(ws, settings, now)
         results = collect.run_collection(sources, settings)
         health = core.jload(os.path.join(ws, "state", "health.json"), {})
         all_changes, rolled, failed = [], [], []
@@ -187,15 +261,33 @@ def run_round(ws, baseline=False):
                                    "url": e.get("link"), "at": now})
             rolled += rolled_entries
             # 详情页富化：detail_enrich 源的新增条目抓详情页补全时间/地点（活动行场景）。
-            # 只富化进变更的副本，快照仍存 RSS 原始条目（键与差分语义不受富化影响）。
+            # 失败分类与补抓（陷阱 73，2026-10-28 定稿）：
+            #   - enrich_dead（活动已下架，回首页）→ 不入补抓清单，重试无意义；
+            #   - enrich_retry（瞬时网络失败）→ 记入 state/enrich_retry.json，下轮补抓；
+            #   - 注意：enrich_detail 就地修改 entry，而 added 元素与 entries 同引用，
+            #     快照会把富化后的 summary 一并保存——该行为历史如此且无害（key 与
+            #     差分语义只看 key/link），本次不改变它，仅把注释中的"快照存原始条目"
+            #     修正为实际行为，避免后人误信注释做错改。
             enrich_budget = [int(settings.get("detail_enrich_max_per_round", 12))]
             do_enrich = bool((s.get("config") or {}).get("detail_enrich"))
+            retry_items = []
             for kind, group in (("added", added), ("removed", removed)):
                 for e in group:
                     if kind == "added" and do_enrich:
                         e = collect.enrich_detail(s, e, settings, enrich_budget)
+                        if e.get("enrich_retry"):
+                            retry_items.append({"key": e.get("key"), "link": e.get("link"),
+                                                "source_id": s["id"], "title": e.get("title") or "",
+                                                "first_seen": now})
                     cid = make_cid(s["id"], kind, e.get("key"))
                     all_changes.append(diffcore.make_change(cid, s, kind, e, now))
+            if retry_items:
+                prev_retry = load_enrich_retry(ws)
+                seen = {r.get("key") for r in prev_retry}
+                save_enrich_retry(ws, prev_retry + [r for r in retry_items
+                                                    if r.get("key") not in seen])
+            # 上轮补抓成功的富化文本合并进本轮同名 added 变更（同 key 才合并）。
+            _apply_enriched_to_changes(enriched, all_changes)
             # 先保存本轮所有待判，再推进快照；任何源写盘失败均可从队列恢复。
             diffcore.enqueue_pending(ws, all_changes, now)
             diffcore.save_snapshot(ws, s["id"], entries, now)
